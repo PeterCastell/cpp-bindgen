@@ -1,0 +1,12 @@
+# Zig build outputs
+.zig-cache/
+zig-cache/
+zig-out/
+
+# MSVC artifacts from compiling the C++ fixture by hand
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.lib
+*.exp
