@@ -42,6 +42,11 @@ struct Array {
     static int size() { return N; }
 };
 
+// A function template with no explicit specialization anywhere: its symbol
+// exists only if the glue explicitly instantiates it.
+template <typename T>
+int tpl_sum(const T& a, const T& b) { return (int)(a + b); }
+
 // A class with a constructor, so a copy is still a memcpy but MSVC returns it
 // through a hidden pointer.
 struct Rgb {

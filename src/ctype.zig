@@ -49,6 +49,24 @@ pub fn ConstPtr(comptime P: type) type {
     };
 }
 
+/// Marks the place a function template's declaration wrote one of its own
+/// template parameters. `TParam(0)` is the first, `TParam(1)` the second.
+///
+/// Itanium mangles a function template specialization from the template's
+/// declaration, not from the substituted signature: `f<std::string>(const T&)`
+/// encodes its parameter as `RKT_`, a reference to template-parameter 0. MSVC
+/// writes the substituted type instead, and takes it from the signature's
+/// `template_args`, so one marker serves both.
+pub fn TParam(comptime index: usize) type {
+    return opaque {
+        pub const cpp_template_param = index;
+    };
+}
+
+pub fn isTParam(comptime T: type) bool {
+    return @typeInfo(T) == .@"opaque" and @hasDecl(T, "cpp_template_param");
+}
+
 /// The pointer behind a `Ref`/`RRef`/`ConstPtr` marker, otherwise `T`.
 pub fn resolve(comptime T: type) type {
     if (isRefMarker(T)) return T.cpp_ref;
@@ -56,11 +74,11 @@ pub fn resolve(comptime T: type) type {
     return T;
 }
 
-fn isRefMarker(comptime T: type) bool {
+pub fn isRefMarker(comptime T: type) bool {
     return @typeInfo(T) == .@"opaque" and @hasDecl(T, "cpp_ref");
 }
 
-fn isConstPtrMarker(comptime T: type) bool {
+pub fn isConstPtrMarker(comptime T: type) bool {
     return @typeInfo(T) == .@"opaque" and @hasDecl(T, "cpp_const_ptr");
 }
 
@@ -158,6 +176,9 @@ pub const CType = union(enum) {
     pointer: Pointer,
     reference: Reference,
     named: Named,
+    /// A template parameter of the enclosing function template, by index.
+    /// Only Itanium encodes one; `substitute` replaces it for everyone else.
+    template_param: usize,
 
     pub const Pointer = struct {
         child: *const CType,
@@ -189,6 +210,7 @@ pub const CType = union(enum) {
             .pointer => |p| p.child.key() ++ (if (p.is_const) " const*" else "*") ++ (if (p.top_const) " const" else ""),
             .reference => |r| r.child.key() ++ (if (r.is_const) " const" else "") ++ (if (r.rvalue) "&&" else "&"),
             .named => |n| pathKey(n.path),
+            .template_param => |i| "$T" ++ decimal(i),
         };
     }
 };
@@ -309,7 +331,9 @@ pub fn fromZig(comptime T: type) CType {
         wchar_t => .{ .builtin = .wchar_t },
         char16_t => .{ .builtin = .char16_t },
         char32_t => .{ .builtin = .char32_t },
-        else => if (comptime isConstPtrMarker(T)) blk: {
+        else => if (comptime isTParam(T))
+            .{ .template_param = T.cpp_template_param }
+        else if (comptime isConstPtrMarker(T)) blk: {
             const inner = fromZig(T.cpp_const_ptr);
             if (inner != .pointer) @compileError("ConstPtr takes a pointer type, got " ++ @typeName(T.cpp_const_ptr));
             break :blk .{ .pointer = .{ .child = inner.pointer.child, .is_const = inner.pointer.is_const, .top_const = true } };
@@ -381,9 +405,51 @@ pub fn fromTemplate(comptime t: Template) CType {
 
 fn templatePath(comptime t: Template) []const Component {
     const plain = splitPath(t.name);
-    comptime var args: []const Arg = &.{};
-    inline for (t.args) |a| args = args ++ &[_]Arg{convertArg(t.name, a)};
+    const args = convertArgs(t.name, t.args);
     return plain[0 .. plain.len - 1] ++ &[_]Component{.{ .name = plain[plain.len - 1].name, .args = args }};
+}
+
+/// Replaces every `template_param` with the matching entry of `args`. The
+/// Itanium mangler is the only consumer that wants the parameters left in,
+/// so everything else runs a type through this first.
+pub fn substitute(comptime t: CType, comptime args: []const Arg) CType {
+    return switch (t) {
+        .builtin => t,
+        .template_param => |i| blk: {
+            if (i >= args.len) @compileError("TParam(" ++ decimal(i) ++ ") but the signature has " ++ decimal(args.len) ++ " template arguments");
+            if (args[i] != .type) @compileError("TParam(" ++ decimal(i) ++ ") names a non-type template argument, which is not a type");
+            break :blk args[i].type;
+        },
+        .pointer => |p| blk: {
+            const child = substitute(p.child.*, args);
+            break :blk .{ .pointer = .{ .child = &child, .is_const = p.is_const, .top_const = p.top_const } };
+        },
+        .reference => |r| blk: {
+            const child = substitute(r.child.*, args);
+            break :blk .{ .reference = .{ .child = &child, .is_const = r.is_const, .rvalue = r.rvalue } };
+        },
+        .named => |n| .{ .named = .{ .path = substitutePath(n.path, args), .kind = n.kind, .abi = n.abi } },
+    };
+}
+
+fn substitutePath(comptime path: []const Component, comptime args: []const Arg) []const Component {
+    comptime var out: []const Component = &.{};
+    inline for (path) |c| {
+        comptime var cargs: []const Arg = &.{};
+        inline for (c.args) |a| cargs = cargs ++ &[_]Arg{switch (a) {
+            .type => |t| .{ .type = substitute(t, args) },
+            .integral => a,
+        }};
+        out = out ++ &[_]Component{.{ .name = c.name, .args = cargs }};
+    }
+    return out;
+}
+
+/// `TemplateArg` values as `Arg` values, for a function template's arguments.
+pub fn convertArgs(comptime tname: []const u8, comptime args: []const TemplateArg) []const Arg {
+    comptime var out: []const Arg = &.{};
+    inline for (args) |a| out = out ++ &[_]Arg{convertArg(tname, a)};
+    return out;
 }
 
 fn convertArg(comptime tname: []const u8, comptime a: TemplateArg) Arg {

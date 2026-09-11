@@ -60,6 +60,7 @@ pub const box_get: Signature = .{ .name = "get", .ret = c_int, .this = *const Bo
 pub const shape_ctor: Signature = .{ .name = "*", .args = &.{c_int}, .this = *Shape };
 pub const shape_dtor: Signature = .{ .name = "~", .this = *Shape };
 pub const shape_area: Signature = .{ .name = "area", .ret = c_int, .this = *const Shape, .virtual = true };
+pub const tpl_sum: Signature = .{ .name = "inl::tpl_sum", .template_args = &.{.{ .type = c_int }}, .args = &.{ cpp.Ref(*const cpp.TParam(0)), cpp.Ref(*const cpp.TParam(0)) }, .ret = c_int };
 pub const rgb_make: Signature = .{ .name = "inl::rgb_make", .args = &.{ c_int, c_int, c_int }, .ret = Rgb };
 pub const rgb_total: Signature = .{ .name = "inl::rgb_total", .args = &.{Rgb}, .ret = c_int };
 

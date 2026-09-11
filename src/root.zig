@@ -21,6 +21,7 @@ pub const uchar = ctype.uchar;
 pub const Ref = ctype.Ref;
 pub const RRef = ctype.RRef;
 pub const ConstPtr = ctype.ConstPtr;
+pub const TParam = ctype.TParam;
 pub const Template = ctype.Template;
 pub const TemplateArg = ctype.TemplateArg;
 pub const ClassAbi = ctype.ClassAbi;
@@ -53,6 +54,13 @@ pub const Signature = struct {
     /// For non-static member functions: `*T` or `*const T`. The constness is
     /// the constness of the method.
     this: ?type = null,
+    /// Template arguments, for a specialization of a function template.
+    /// Wherever the template's *declaration* wrote one of its own parameters,
+    /// write `TParam(n)`: `void f<std::string>(const T&, float)` is
+    /// `.template_args = &.{.{ .type = Str }}` with
+    /// `.args = &.{ Ref(*const TParam(0)), f32 }`. Itanium needs the
+    /// declared form, MSVC the substituted one, and this gives both.
+    template_args: []const TemplateArg = &.{},
     /// The method is declared `virtual`. Only MSVC mangles the difference;
     /// the call is still a direct call to that class's implementation.
     /// Destructors take this from the class's `cpp_virtual_dtor` instead.
@@ -82,7 +90,49 @@ pub const Signature = struct {
 /// Reference markers become the pointers they wrap; `.managed_copy`
 /// arguments become `*T`. See `ClassAbi`.
 pub fn FnType(comptime sig: Signature) type {
-    return fnTypeOf(visibleParams(sig), visibleRet(sig));
+    const r = comptime substituted(sig);
+    return fnTypeOf(visibleParams(r), visibleRet(r));
+}
+
+/// The signature with every `TParam` replaced by the template argument it
+/// names. Only the mangled name is built from the declared form; everything
+/// that decides how the call is shaped works from this.
+fn substituted(comptime sig: Signature) Signature {
+    if (sig.template_args.len == 0) return sig;
+    comptime var out = sig;
+    comptime var args: []const type = &.{};
+    inline for (sig.args) |A| args = args ++ &[_]type{substType(sig, A)};
+    out.args = args;
+    out.ret = substType(sig, sig.ret);
+    return out;
+}
+
+fn substType(comptime sig: Signature, comptime T: type) type {
+    if (comptime ctype.isTParam(T)) return argType(sig, T);
+    if (comptime ctype.isRefMarker(T)) {
+        const P = substPointer(sig, T.cpp_ref);
+        return if (T.cpp_rvalue) ctype.RRef(P) else ctype.Ref(P);
+    }
+    if (comptime ctype.isConstPtrMarker(T)) return ctype.ConstPtr(substPointer(sig, T.cpp_const_ptr));
+    return substPointer(sig, T);
+}
+
+/// Only a single-item pointer is rebuilt: that is what a reference to a
+/// template parameter resolves to, and what a `T*` parameter is.
+fn substPointer(comptime sig: Signature, comptime P: type) type {
+    const info = @typeInfo(P);
+    if (info != .pointer or info.pointer.size != .one) return P;
+    if (!comptime ctype.isTParam(info.pointer.child)) return P;
+    const Sub = argType(sig, info.pointer.child);
+    return if (info.pointer.attrs.@"const") *const Sub else *Sub;
+}
+
+fn argType(comptime sig: Signature, comptime T: type) type {
+    const i = T.cpp_template_param;
+    if (i >= sig.template_args.len) @compileError(sig.name ++ ": TParam(" ++ ctype.decimal(i) ++ ") but only " ++ ctype.decimal(sig.template_args.len) ++ " template arguments were given");
+    const a = sig.template_args[i];
+    if (a != .type) @compileError(sig.name ++ ": TParam(" ++ ctype.decimal(i) ++ ") names a non-type template argument, which cannot be a parameter type");
+    return a.type;
 }
 
 fn fnTypeOf(comptime params: []const type, comptime Ret: type) type {
@@ -129,14 +179,15 @@ pub fn bind(comptime sig: Signature) *const FnType(sig) {
 /// Like `bind`, with an explicit mangling. Useful for a `windows-gnu` build
 /// that links a library produced by Visual C++.
 pub fn bindAs(comptime mangling: Mangling, comptime sig: Signature) *const FnType(sig) {
+    const r = comptime substituted(sig);
     const f = comptime describe(sig);
-    const plan = comptime planFor(mangling, sig, f);
+    const plan = comptime planFor(mangling, r, f);
     const name = comptime mangledName(mangling, sig);
-    if (comptime plan.isIdentity(sig)) {
+    if (comptime plan.isIdentity(r)) {
         return @extern(*const FnType(sig), .{ .name = name });
     }
     const ext = @extern(*const fnTypeOf(plan.ext_params, plan.ext_ret), .{ .name = name });
-    return trampoline(mangling, sig, plan, ext);
+    return trampoline(mangling, r, plan, ext);
 }
 
 /// Where a parameter of the real extern function comes from.
@@ -331,7 +382,7 @@ pub fn describe(comptime sig: Signature) ctype.Function {
     inline for (sig.args) |A| params = params ++ &[_]ctype.CType{ctype.fromZig(A)};
     const ret = ctype.fromZig(sig.ret);
 
-    const path = pathOf(sig);
+    const path = templated(sig, pathOf(sig));
     const last = path[path.len - 1].name;
     const special: ctype.Function.Special = if (std.mem.eql(u8, last, "*")) .ctor else if (std.mem.eql(u8, last, "~")) .dtor else .none;
 
@@ -357,6 +408,15 @@ pub fn describe(comptime sig: Signature) ctype.Function {
         if (special == .dtor and sig.args.len != 0) @compileError(sig.name ++ ": a destructor takes no arguments");
     }
     return f;
+}
+
+/// Attaches `template_args` to the function's own name component, which is
+/// where both manglers look for them.
+fn templated(comptime sig: Signature, comptime path: []const ctype.Component) []const ctype.Component {
+    if (sig.template_args.len == 0) return path;
+    const last = path[path.len - 1];
+    if (last.args.len > 0) @compileError(sig.name ++ ": the name already carries template arguments");
+    return path[0 .. path.len - 1] ++ &[_]ctype.Component{.{ .name = last.name, .args = ctype.convertArgs(sig.name, sig.template_args) }};
 }
 
 fn pathOf(comptime sig: Signature) []const ctype.Component {

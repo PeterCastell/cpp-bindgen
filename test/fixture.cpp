@@ -101,6 +101,26 @@ namespace tpl {
     template struct Box<char>;
 }
 
+// Function templates. Itanium encodes the template's declared signature
+// (`RKT_`) plus the return type; MSVC encodes the substituted types.
+namespace ns {
+    template<typename T> int tpl_id(const T& v);
+    template<> int tpl_id(const int& v) { return v + 1; }
+    template<> int tpl_id(const Vec2& v) { return v.x * 10 + v.y; }
+
+    // Uses T twice, so Itanium back-references the second one.
+    template<typename T> T tpl_echo(T v) { return v; }
+    template int tpl_echo<int>(int);
+
+    struct Tpl {
+        int n;
+        template<typename T> int take(const T& v) const;
+        template<typename T> static int make(const T& v);
+    };
+    template<> int Tpl::take(const int& v) const { return n * 100 + v; }
+    template<> int Tpl::make(const int& v) { return v * 3; }
+}
+
 // Constructors and destructors: plain, polymorphic, and with a virtual base.
 namespace ns {
     static int dtor_calls_ = 0;

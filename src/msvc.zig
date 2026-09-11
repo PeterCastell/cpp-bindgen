@@ -32,7 +32,10 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
     @setEvalBranchQuota(1 << 20);
     comptime var st = State{};
     if (f.this != null and f.path.len < 2) @compileError("a member function needs a class in its name: '" ++ ctype.pathKey(f.path) ++ "'");
-    if (f.path[f.path.len - 1].args.len > 0) @compileError("function templates are not supported: '" ++ ctype.pathKey(f.path) ++ "'");
+    // MSVC writes a function template's signature with its template arguments
+    // substituted in, unlike Itanium; `qualifiedName` already spells the
+    // `?$name@args@` part, which the leading `?` turns into `??$`.
+    const targs = f.path[f.path.len - 1].args;
 
     // Special names: ?0 ctor, ?1 dtor, ?_D complete dtor with virtual bases.
     const vbase_dtor = f.special == .dtor and f.virtual_bases;
@@ -45,7 +48,7 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
     if (special_name) |s| {
         out = out ++ s ++ qualifiedName(f.path[0 .. f.path.len - 1], &st);
     } else {
-        out = out ++ qualifiedName(f.path, &st);
+        out = out ++ functionName(f.path, &st);
     }
 
     if (f.this) |t| {
@@ -61,15 +64,16 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
     }
 
     // Return slot: `@` for ctors/dtors, `?A` prefix for classes by value.
+    const ret = comptime ctype.substitute(f.ret, targs);
     out = out ++ if (f.special != .none and !vbase_dtor)
         "@"
     else
-        (if (f.ret == .named) "?A" else "") ++ mangleType(f.ret, &st, false);
+        (if (ret == .named) "?A" else "") ++ mangleType(ret, &st, false);
 
     if (f.params.len == 0) {
         out = out ++ "X";
     } else {
-        inline for (f.params) |p| out = out ++ mangleParam(p, &st);
+        inline for (f.params) |p| out = out ++ mangleParam(ctype.substitute(p, targs), &st);
         out = out ++ "@";
     }
     return out ++ "Z";
@@ -79,6 +83,20 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
 fn qualifiedName(comptime path: []const Component, comptime st: *State) []const u8 {
     comptime var out: []const u8 = "";
     comptime var i = path.len;
+    inline while (i > 0) : (i -= 1) out = out ++ component(path[i - 1], st);
+    return out ++ "@";
+}
+
+/// The name of the function being mangled. It differs from `qualifiedName` in
+/// one place: when the function is a template, its own template-id takes no
+/// slot in the name table, though a class template-id in an enclosing scope
+/// still does. Clang mangles a template-id in a swapped-out back-reference
+/// context, and for the leaf there is no outer name left to record.
+fn functionName(comptime path: []const Component, comptime st: *State) []const u8 {
+    const leaf = path[path.len - 1];
+    if (leaf.args.len == 0) return qualifiedName(path, st);
+    comptime var out: []const u8 = templateId(leaf);
+    comptime var i = path.len - 1;
     inline while (i > 0) : (i -= 1) out = out ++ component(path[i - 1], st);
     return out ++ "@";
 }
@@ -128,6 +146,8 @@ fn mangleType(comptime t: CType, comptime st: *State, comptime self_const: bool)
         .pointer => |p| (if (self_const or p.top_const) "Q" else "P") ++ indirectSuffix(p.child, p.is_const, st),
         .reference => |r| (if (r.rvalue) "$$Q" else "A") ++ indirectSuffix(r.child, r.is_const, st),
         .named => |n| kindCode(n.kind) ++ qualifiedName(n.path, st),
+        // `substitute` runs before mangling, so none can reach here.
+        .template_param => |i| @compileError("template parameter T" ++ ctype.decimal(i) ++ " has no template argument to substitute"),
     };
 }
 

@@ -14,6 +14,7 @@ pub fn typeName(comptime t: CType) []const u8 {
         .pointer => |p| typeName(p.child.*) ++ (if (p.is_const) " const*" else "*") ++ (if (p.top_const) " const" else ""),
         .reference => |r| typeName(r.child.*) ++ (if (r.is_const) " const" else "") ++ (if (r.rvalue) "&&" else "&"),
         .named => |n| pathName(n.path),
+        .template_param => |i| @compileError("a template parameter has no C++ spelling; substitute T" ++ ctype.decimal(i) ++ " first"),
     };
 }
 

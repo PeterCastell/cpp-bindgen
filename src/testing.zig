@@ -9,6 +9,7 @@ const Kind = cpp.Kind;
 const Ref = cpp.Ref;
 const RRef = cpp.RRef;
 const ConstPtr = cpp.ConstPtr;
+const TParam = cpp.TParam;
 const wchar_t = cpp.wchar_t;
 const char16_t = cpp.char16_t;
 const char32_t = cpp.char32_t;
@@ -27,6 +28,11 @@ const Vec2 = extern struct {
     x: c_int,
     y: c_int,
     pub const cpp_name = "ns::Vec2";
+};
+
+const Tpl = extern struct {
+    n: c_int,
+    pub const cpp_name = "ns::Tpl";
 };
 
 const Qualifier = enum(c_int) {
@@ -189,6 +195,14 @@ const cases = [_]Case{
     // Only Itanium folds the two into one substitution; for MSVC they differ.
     .{ .sig = .{ .name = "ns::cptr_mix", .args = &.{ ConstPtr([*c]u8), [*c]u8 }, .ret = c_int }, .itanium = "_ZN2ns8cptr_mixEPcS0_", .msvc = "?cptr_mix@ns@@YAHQEADPEAD@Z" },
     .{ .sig = .{ .name = "ns::cptr_both", .args = &.{ ConstPtr([*c]const u8), ConstPtr([*c]const u8) }, .ret = c_int }, .itanium = "_ZN2ns9cptr_bothEPKcS1_", .msvc = "?cptr_both@ns@@YAHQEBD0@Z" },
+    // Function templates. Itanium spells the declared parameter (`RKT_`) and
+    // adds the return type; MSVC spells the substituted one.
+    .{ .sig = .{ .name = "ns::tpl_id", .template_args = &.{.{ .type = c_int }}, .args = &.{Ref(*const TParam(0))}, .ret = c_int }, .itanium = "_ZN2ns6tpl_idIiEEiRKT_", .msvc = "??$tpl_id@H@ns@@YAHAEBH@Z" },
+    .{ .sig = .{ .name = "ns::tpl_id", .template_args = &.{.{ .type = Vec2 }}, .args = &.{Ref(*const TParam(0))}, .ret = c_int }, .itanium = "_ZN2ns6tpl_idINS_4Vec2EEEiRKT_", .msvc = "??$tpl_id@UVec2@ns@@@ns@@YAHAEBUVec2@0@@Z" },
+    // T twice: Itanium back-references the second, MSVC repeats `H`.
+    .{ .sig = .{ .name = "ns::tpl_echo", .template_args = &.{.{ .type = c_int }}, .args = &.{TParam(0)}, .ret = TParam(0) }, .itanium = "_ZN2ns8tpl_echoIiEET_S1_", .msvc = "??$tpl_echo@H@ns@@YAHH@Z" },
+    .{ .sig = .{ .name = "take", .this = *const Tpl, .template_args = &.{.{ .type = c_int }}, .args = &.{Ref(*const TParam(0))}, .ret = c_int }, .itanium = "_ZNK2ns3Tpl4takeIiEEiRKT_", .msvc = "??$take@H@Tpl@ns@@QEBAHAEBH@Z" },
+    .{ .sig = .{ .name = "make", .class = Tpl, .template_args = &.{.{ .type = c_int }}, .args = &.{Ref(*const TParam(0))}, .ret = c_int }, .itanium = "_ZN2ns3Tpl4makeIiEEiRKT_", .msvc = "??$make@H@Tpl@ns@@SAHAEBH@Z" },
     .{ .sig = .{ .name = "get", .ret = c_int, .this = *const Counter }, .itanium = "_ZNK2ns7Counter3getEv", .msvc = "?get@Counter@ns@@QEBAHXZ" },
     // Class-template specializations.
     .{ .sig = .{ .name = "pair_sum", .args = &.{Ref(*const PairInt)}, .ret = c_int }, .itanium = "_Z8pair_sumRK4PairIiE", .msvc = "?pair_sum@@YAHAEBU?$Pair@H@@@Z" },
@@ -530,4 +544,28 @@ test "managed_copy by value" {
     try std.testing.expectEqual(base + 1, live());
     holder_dtor(&h);
     try std.testing.expectEqual(base, live());
+}
+
+test "function template specializations" {
+    const int_arg: []const cpp.TemplateArg = &.{.{ .type = c_int }};
+
+    const id_int = cpp.bind(.{ .name = "ns::tpl_id", .template_args = int_arg, .args = &.{Ref(*const TParam(0))}, .ret = c_int });
+    var n: c_int = 41;
+    try std.testing.expectEqual(42, id_int(&n));
+
+    const id_vec = cpp.bind(.{ .name = "ns::tpl_id", .template_args = &.{.{ .type = Vec2 }}, .args = &.{Ref(*const TParam(0))}, .ret = c_int });
+    const v = Vec2{ .x = 3, .y = 4 };
+    try std.testing.expectEqual(34, id_vec(&v));
+
+    const echo = cpp.bind(.{ .name = "ns::tpl_echo", .template_args = int_arg, .args = &.{TParam(0)}, .ret = TParam(0) });
+    try std.testing.expectEqual(7, echo(7));
+
+    const take = cpp.bind(.{ .name = "take", .this = *const Tpl, .template_args = int_arg, .args = &.{Ref(*const TParam(0))}, .ret = c_int });
+    const t = Tpl{ .n = 5 };
+    var one: c_int = 1;
+    try std.testing.expectEqual(501, take(&t, &one));
+
+    const make = cpp.bind(.{ .name = "make", .class = Tpl, .template_args = int_arg, .args = &.{Ref(*const TParam(0))}, .ret = c_int });
+    var three: c_int = 3;
+    try std.testing.expectEqual(9, make(&three));
 }

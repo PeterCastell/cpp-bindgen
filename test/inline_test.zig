@@ -48,6 +48,13 @@ test "explicitly instantiated template" {
     try std.testing.expectEqual(3, size());
 }
 
+test "explicitly instantiated function template" {
+    const sum = cpp.bind(inl.tpl_sum);
+    var a: c_int = 20;
+    var b: c_int = 3;
+    try std.testing.expectEqual(23, sum(&a, &b));
+}
+
 test "inline class returned by value" {
     const make = cpp.bind(inl.rgb_make);
     const total = cpp.bind(inl.rgb_total);

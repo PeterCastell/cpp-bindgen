@@ -47,6 +47,46 @@ set(&counter, add(2, 3));
 for the cases that the three short forms do not cover, such as a virtual method, a
 constructor, or a reference parameter. `mangledName` returns the symbol name alone.
 
+## Parameter markers
+
+Three markers spell a parameter or return type that a Zig type cannot. None of them
+exists at run time: the bound function takes the pointer inside.
+
+- `Ref(*const T)` is `const T&`, `Ref(*T)` is `T&`, and `RRef(*T)` is `T&&`.
+- `ConstPtr([*c]const u8)` is `const char* const`, a const *pointer* rather than a
+  pointer to const. Itanium drops a top-level qualifier from a parameter type, so it
+  changes nothing there; MSVC spells such a pointer `Q` rather than `P`, and the MSVC
+  standard library declares parameters this way, `basic_string`'s `const char* const`
+  constructors among them.
+- `TParam(0)` is the enclosing function template's first template parameter. See below.
+
+## Function templates
+
+A specialization of a function template has a template-mangled symbol. Give the
+arguments in `template_args`, and write `TParam(n)` wherever the template's
+*declaration* named one of its own parameters:
+
+```zig
+// template<typename T> void ofDrawBitmapString(const T&, float x, float y, float z);
+// template<> void ofDrawBitmapString(const std::string&, float, float, float);
+const draw = cpp.bind(.{
+    .name = "ofDrawBitmapString",
+    .template_args = &.{.{ .type = StdString }},
+    .args = &.{ Ref(*const TParam(0)), f32, f32, f32 },
+});
+
+draw(&text, 10, 20, 0);   // the Zig parameter is *const StdString
+```
+
+Both halves are needed because the two ABIs disagree about which signature to encode.
+Itanium mangles the template's declared form, `RKT_`, a reference to
+template-parameter 0; MSVC mangles the substituted form, `AEBV?$basic_string@...`.
+`TParam` gives one spelling that satisfies both, and the Zig-visible parameter type is
+the substituted one either way.
+
+Member and static member function templates take the same fields, alongside `this` or
+`class`.
+
 ## Classes
 
 A Zig type describes its C++ class through public declarations. It must be an
@@ -77,9 +117,10 @@ object, because the library reads no headers. `addCppGlue` checks that for you.
 `cpp-bindgen` can generate a C++ translation unit for your bindings. It does two
 things no Zig code can do for itself:
 
-- **It makes header-only definitions exist.** A class template specialization, an
-  inline function, an inline member: none of them has a symbol until some translation
-  unit emits one, and a header alone never does. The glue is that translation unit.
+- **It makes header-only definitions exist.** A class template specialization, a
+  function template specialization, an inline function, an inline member: none of them
+  has a symbol until some translation unit emits one, and a header alone never does.
+  The glue is that translation unit.
 - **It checks every layout fact your bindings assert**, in the C++ compiler, against
   the real class: size, alignment, member offsets, and `cpp_abi` category. Those are
   what a binding gets wrong, and a `static_assert` turns a silent memory corruption
@@ -139,6 +180,8 @@ name.
 ## Limits
 
 - A call that needs a wrapper takes at most 10 parameters.
+- A `TParam` is understood as a whole parameter, as the pointee of a reference, or as
+  a template argument of another type. Nowhere else.
 - On AArch64, a function that returns a class through a hidden pointer fails to
   compile.
 - The library reads no headers. You write each signature, and you keep it correct

@@ -181,11 +181,36 @@ fn definitions(comptime fns: []const ctype.Function, comptime types: []const Ent
         out = out ++ switch (f.special) {
             .ctor => ctorStub(f, types, name),
             .dtor => dtorStub(f, types, name),
-            .none => if (f.is_virtual) virtualStub(f, types, name) else pointerDecl(f, name),
+            .none => if (f.path[f.path.len - 1].args.len > 0)
+                fnInstantiation(f)
+            else if (f.is_virtual)
+                virtualStub(f, types, name)
+            else
+                pointerDecl(f, name),
         } ++ "\n";
     }
     if (out.len == 0) return "";
     return "\n// Header-only functions, forced to exist as symbols.\n" ++ out;
+}
+
+/// `template int ns::tpl_id<int>(int const&);` — an explicit instantiation
+/// definition, which emits the specialization outright. Taking the address
+/// would only deduce it, and a deduced specialization of a header-only
+/// template is still nothing the linker can find. Where the program also
+/// explicitly specializes these arguments the instantiation has no effect,
+/// which is right: that specialization has its own definition elsewhere.
+fn fnInstantiation(comptime f: ctype.Function) []const u8 {
+    const targs = f.path[f.path.len - 1].args;
+    const ret = cppsrc.typeName(ctype.substitute(f.ret, targs));
+    const params = cppsrc.paramList(substituteAll(f.params, targs));
+    const qual = if (f.this) |t| (if (t.is_const) " const" else "") else "";
+    return "template " ++ ret ++ " " ++ cppsrc.pathName(f.path) ++ params ++ qual ++ ";";
+}
+
+fn substituteAll(comptime params: []const CType, comptime targs: []const ctype.Arg) []const CType {
+    comptime var out: []const CType = &.{};
+    inline for (params) |p| out = out ++ &[_]CType{ctype.substitute(p, targs)};
+    return out;
 }
 
 /// `int (*cppbindgen_f0)(int, int) = &ns::add;`, or the member-pointer form.
@@ -340,6 +365,20 @@ test "render instantiates a specialization and forces a constructor" {
     try expectContains(out, "void cppbindgen_f0(int a0) { cppbindgen_t0 tmp(a0); (void)tmp; }");
     try expectContains(out, "void cppbindgen_f1(cppbindgen_t0* self) { self->cppbindgen_t0::~cppbindgen_t0(); }");
     try expectContains(out, "static_assert(!(__is_trivially_constructible(cppbindgen_t0, cppbindgen_t0 const&)");
+}
+
+test "render instantiates a function template" {
+    const mod = struct {
+        pub const Vec = extern struct {
+            x: c_int,
+            pub const cpp_name = "ns::Vec";
+        };
+        pub const id: Signature = .{ .name = "ns::tpl_id", .template_args = &.{.{ .type = Vec }}, .args = &.{cpp.Ref(*const cpp.TParam(0))}, .ret = c_int };
+        pub const take: Signature = .{ .name = "take", .this = *const Vec, .template_args = &.{.{ .type = c_int }}, .args = &.{cpp.Ref(*const cpp.TParam(0))}, .ret = c_int };
+    };
+    const out = comptime render(.{ .modules = &.{mod} });
+    try expectContains(out, "template int ns::tpl_id<ns::Vec>(ns::Vec const&);");
+    try expectContains(out, "template int ns::Vec::take<int>(int const&) const;");
 }
 
 test "render skips padding fields and honours opt-outs" {

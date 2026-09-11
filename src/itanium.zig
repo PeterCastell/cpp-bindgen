@@ -36,10 +36,13 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
     comptime var out: []const u8 = "_Z";
 
     if (f.this != null and f.path.len < 2) @compileError("a member function needs a class in its name: '" ++ ctype.pathKey(f.path) ++ "'");
-    if (f.path[f.path.len - 1].args.len > 0) @compileError("function templates are not supported: '" ++ ctype.pathKey(f.path) ++ "'");
+    const last = f.path[f.path.len - 1];
+    const is_template = last.args.len > 0;
+    if (is_template and f.special != .none) @compileError("a constructor or destructor cannot be a template: '" ++ ctype.pathKey(f.path) ++ "'");
 
     if (f.path.len == 1) {
-        out = out ++ sourceName(f.path[0].name);
+        out = out ++ sourceName(last.name);
+        if (is_template) out = out ++ templateArgs(last.args, &subs);
     } else {
         out = out ++ "N";
         if (f.this) |t| if (t.is_const) {
@@ -52,6 +55,10 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
         };
         out = out ++ "E";
     }
+
+    // A function template encodes its return type; a plain function does not,
+    // because two functions differing only in return type cannot both exist.
+    if (is_template) out = out ++ mangleType(stripTopConst(f.ret), &subs);
 
     if (f.params.len == 0) {
         out = out ++ "v";
@@ -149,6 +156,13 @@ fn mangleType(comptime t: CType, comptime subs: *Subs) []const u8 {
         .builtin => |b| return builtinCode(b),
         .pointer => |p| return indirect("P", t, p.child, p.is_const, subs),
         .reference => |r| return indirect(if (r.rvalue) "O" else "R", t, r.child, r.is_const, subs),
+        .template_param => |i| {
+            if (subs.find(t.key())) |idx| return Subs.ref(idx);
+            // `T_` is the first template parameter, `T0_` the second.
+            const out = if (i == 0) "T_" else "T" ++ ctype.decimal(i - 1) ++ "_";
+            subs.add(t.key());
+            return out;
+        },
         .named => |n| {
             if (subs.find(t.key())) |idx| return Subs.ref(idx);
             if (n.path.len == 1) return qualified(n.path, true, subs);
