@@ -10,15 +10,25 @@ const cpp = @import("cpp_bindgen");
 
 const Signature = cpp.Signature;
 
+// A class's methods can be declared on the class: the glue scans a type's
+// public declarations the same way it scans a module's.
 pub const Counter = extern struct {
     n: c_int,
     pub const cpp_name = "inl::Counter";
+
+    pub const get: Signature = .{ .name = "get", .ret = c_int, .this = *const @This() };
+    pub const set: Signature = .{ .name = "set", .args = &.{c_int}, .this = *@This() };
+    pub const magic: Signature = .{ .name = "magic", .ret = c_int, .class = @This() };
 };
 
 pub const Box = extern struct {
     v: c_int,
     pub const cpp_name = "inl::Box";
     pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+
+    pub const ctor: Signature = .{ .name = "*", .args = &.{c_int}, .this = *@This() };
+    pub const dtor: Signature = .{ .name = "~", .this = *@This() };
+    pub const get: Signature = .{ .name = "get", .ret = c_int, .this = *const @This() };
 };
 
 /// One vtable pointer, then the members. A field named with a leading `_` is
@@ -47,16 +57,11 @@ pub const Rgb = extern struct {
     pub const cpp_abi: cpp.ClassAbi = .trivial_copy;
 };
 
-// Every header-only function the tests call. A `Signature` constant is what
-// the scan picks up, and `cpp.bind` takes the same value, so the glue and the
-// call can never describe different functions.
+// Free functions, and the methods of classes that keep theirs at module
+// scope. A `Signature` constant is what the scan picks up, and `cpp.bind`
+// takes the same value, so the glue and the call can never describe
+// different functions.
 pub const add: Signature = .{ .name = "inl::add", .args = &.{ c_int, c_int }, .ret = c_int };
-pub const counter_get: Signature = .{ .name = "get", .ret = c_int, .this = *const Counter };
-pub const counter_set: Signature = .{ .name = "set", .args = &.{c_int}, .this = *Counter };
-pub const counter_magic: Signature = .{ .name = "magic", .ret = c_int, .class = Counter };
-pub const box_ctor: Signature = .{ .name = "*", .args = &.{c_int}, .this = *Box };
-pub const box_dtor: Signature = .{ .name = "~", .this = *Box };
-pub const box_get: Signature = .{ .name = "get", .ret = c_int, .this = *const Box };
 pub const shape_ctor: Signature = .{ .name = "*", .args = &.{c_int}, .this = *Shape };
 pub const shape_dtor: Signature = .{ .name = "~", .this = *Shape };
 pub const shape_area: Signature = .{ .name = "area", .ret = c_int, .this = *const Shape, .virtual = true };

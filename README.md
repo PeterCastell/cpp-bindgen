@@ -127,24 +127,34 @@ things no Zig code can do for itself:
   into a compile error.
 
 Put a manifest in your bindings file. It names the headers to include and the modules
-to scan; scanning finds every public type that carries `cpp_name` or `cpp_template`,
-and every public `Signature` constant.
+to scan. Scanning runs twice: first over each module's public declarations, keeping
+every type that carries `cpp_name` or `cpp_template` and every `Signature` constant;
+then over the public declarations of each type it found, keeping the `Signature`
+constants there too. So a class's methods can live on the class.
 
 ```zig
 pub const Counter = extern struct {
     n: c_int,
     pub const cpp_name = "inl::Counter";
+
+    // Declare a Signature for anything header-only, and bind that same value:
+    // the glue and the call can then never describe different functions.
+    pub const get: cpp.Signature = .{ .name = "get", .ret = c_int, .this = *const @This() };
 };
 
-// Declare a Signature for anything header-only, and bind that same value: the
-// glue and the call can then never describe different functions.
-pub const get: cpp.Signature = .{ .name = "get", .ret = c_int, .this = *const Counter };
+// A free function's signature goes at module scope.
+pub const add: cpp.Signature = .{ .name = "inl::add", .args = &.{ c_int, c_int }, .ret = c_int };
 
 pub const cpp_manifest: cpp.emit.Manifest = .{
     .headers = &.{"counter.hpp"},
     .modules = &.{@This()},
 };
 ```
+
+Bind through the constant, `cpp.bind(Counter.get)`, rather than calling `bindMethod`
+directly: a bound function pointer cannot yield back the signature that produced it,
+so a `bindMethod` call site is invisible to the scan. The same function reached twice
+is emitted once.
 
 Then wire it into `build.zig`:
 

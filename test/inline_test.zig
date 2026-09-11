@@ -9,20 +9,20 @@ test "inline free function and inline members" {
     const add = cpp.bind(inl.add);
     try std.testing.expectEqual(304, add(3, 4));
 
-    const magic = cpp.bind(inl.counter_magic);
+    const magic = cpp.bind(inl.Counter.magic);
     try std.testing.expectEqual(4242, magic());
 
-    const get = cpp.bind(inl.counter_get);
-    const set = cpp.bind(inl.counter_set);
+    const get = cpp.bind(inl.Counter.get);
+    const set = cpp.bind(inl.Counter.set);
     var c: inl.Counter = .{ .n = 0 };
     set(&c, 17);
     try std.testing.expectEqual(17, get(&c));
 }
 
 test "inline constructor and destructor" {
-    const ctor = cpp.bind(inl.box_ctor);
-    const dtor = cpp.bind(inl.box_dtor);
-    const get = cpp.bind(inl.box_get);
+    const ctor = cpp.bind(inl.Box.ctor);
+    const dtor = cpp.bind(inl.Box.dtor);
+    const get = cpp.bind(inl.Box.get);
     var b: inl.Box = undefined;
     ctor(&b, 21);
     try std.testing.expectEqual(21, get(&b));
