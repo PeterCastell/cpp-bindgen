@@ -11,7 +11,7 @@ const Component = ctype.Component;
 pub fn typeName(comptime t: CType) []const u8 {
     return switch (t) {
         .builtin => |b| builtinName(b),
-        .pointer => |p| typeName(p.child.*) ++ (if (p.is_const) " const*" else "*"),
+        .pointer => |p| typeName(p.child.*) ++ (if (p.is_const) " const*" else "*") ++ (if (p.top_const) " const" else ""),
         .reference => |r| typeName(r.child.*) ++ (if (r.is_const) " const" else "") ++ (if (r.rvalue) "&&" else "&"),
         .named => |n| pathName(n.path),
     };

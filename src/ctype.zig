@@ -32,13 +32,36 @@ pub fn RRef(comptime P: type) type {
     };
 }
 
-/// The pointer behind a `Ref`/`RRef` marker, otherwise `T`.
+/// Marks a parameter or return type whose *pointer* is const, not its
+/// pointee: `ConstPtr([*c]u8)` is `char* const` and
+/// `ConstPtr([*c]const u8)` is `const char* const`. Itanium drops a
+/// top-level qualifier from a parameter type, so this changes nothing there;
+/// MSVC mangles it, spelling the pointer `Q` rather than `P`. The MSVC
+/// standard library declares parameters this way, `basic_string`'s
+/// `const char* const` constructors among them. Like `Ref`, the marker never
+/// exists at run time: the bound function still takes `P`.
+///
+/// Only the outermost pointer needs it. A const pointer further in is the
+/// parent pointer's pointee constness, which `*const [*c]T` already spells.
+pub fn ConstPtr(comptime P: type) type {
+    return opaque {
+        pub const cpp_const_ptr = P;
+    };
+}
+
+/// The pointer behind a `Ref`/`RRef`/`ConstPtr` marker, otherwise `T`.
 pub fn resolve(comptime T: type) type {
-    return if (isRefMarker(T)) T.cpp_ref else T;
+    if (isRefMarker(T)) return T.cpp_ref;
+    if (isConstPtrMarker(T)) return T.cpp_const_ptr;
+    return T;
 }
 
 fn isRefMarker(comptime T: type) bool {
     return @typeInfo(T) == .@"opaque" and @hasDecl(T, "cpp_ref");
+}
+
+fn isConstPtrMarker(comptime T: type) bool {
+    return @typeInfo(T) == .@"opaque" and @hasDecl(T, "cpp_const_ptr");
 }
 
 pub const Builtin = enum {
@@ -138,8 +161,13 @@ pub const CType = union(enum) {
 
     pub const Pointer = struct {
         child: *const CType,
-        /// Pointee constness; a const pointer is the parent's `is_const`.
+        /// Pointee constness; a const pointer further in is the parent's
+        /// `is_const`.
         is_const: bool,
+        /// The pointer itself is const: `T* const`, from `ConstPtr`. Only
+        /// MSVC mangles it, and only at the top level of a parameter or a
+        /// return type.
+        top_const: bool = false,
     };
 
     pub const Reference = struct {
@@ -158,7 +186,7 @@ pub const CType = union(enum) {
     pub fn key(comptime t: CType) []const u8 {
         return switch (t) {
             .builtin => |b| @tagName(b),
-            .pointer => |p| p.child.key() ++ (if (p.is_const) " const*" else "*"),
+            .pointer => |p| p.child.key() ++ (if (p.is_const) " const*" else "*") ++ (if (p.top_const) " const" else ""),
             .reference => |r| r.child.key() ++ (if (r.is_const) " const" else "") ++ (if (r.rvalue) "&&" else "&"),
             .named => |n| pathKey(n.path),
         };
@@ -281,10 +309,15 @@ pub fn fromZig(comptime T: type) CType {
         wchar_t => .{ .builtin = .wchar_t },
         char16_t => .{ .builtin = .char16_t },
         char32_t => .{ .builtin = .char32_t },
-        else => if (comptime isRefMarker(T)) blk: {
+        else => if (comptime isConstPtrMarker(T)) blk: {
+            const inner = fromZig(T.cpp_const_ptr);
+            if (inner != .pointer) @compileError("ConstPtr takes a pointer type, got " ++ @typeName(T.cpp_const_ptr));
+            break :blk .{ .pointer = .{ .child = inner.pointer.child, .is_const = inner.pointer.is_const, .top_const = true } };
+        } else if (comptime isRefMarker(T)) blk: {
             const info = @typeInfo(T.cpp_ref);
             if (info != .pointer or info.pointer.size != .one) @compileError("Ref/RRef take a single-item pointer, got " ++ @typeName(T.cpp_ref));
             if (comptime isRefMarker(info.pointer.child)) @compileError("a reference to a reference is not a C++ type (" ++ @typeName(T.cpp_ref) ++ ")");
+            if (comptime isConstPtrMarker(info.pointer.child)) @compileError("a reference to a const pointer is `T* const&`, which is Ref(*const [*c]T) (" ++ @typeName(T.cpp_ref) ++ ")");
             const child = fromZig(info.pointer.child);
             break :blk .{ .reference = .{ .child = &child, .is_const = info.pointer.attrs.@"const", .rvalue = T.cpp_rvalue } };
         } else switch (@typeInfo(T)) {
@@ -292,6 +325,7 @@ pub fn fromZig(comptime T: type) CType {
                 if (p.size == .slice) @compileError("slices have no C++ equivalent; use a pointer (" ++ @typeName(T) ++ ")");
                 if (@typeInfo(p.child) == .@"fn") @compileError("function pointers are not supported yet (" ++ @typeName(T) ++ ")");
                 if (comptime isRefMarker(p.child)) @compileError("a pointer to a reference is not a C++ type (" ++ @typeName(T) ++ ")");
+                if (comptime isConstPtrMarker(p.child)) @compileError("a const pointer inside a pointer is the outer pointer's pointee constness; write *const " ++ @typeName(p.child.cpp_const_ptr) ++ " (" ++ @typeName(T) ++ ")");
                 const child = fromZig(p.child);
                 break :blk .{ .pointer = .{ .child = &child, .is_const = p.attrs.@"const" } };
             },

@@ -56,7 +56,7 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
     if (f.params.len == 0) {
         out = out ++ "v";
     } else {
-        inline for (f.params) |p| out = out ++ mangleType(p, &subs);
+        inline for (f.params) |p| out = out ++ mangleType(stripTopConst(p), &subs);
     }
     return out;
 }
@@ -75,6 +75,17 @@ fn ctorVariant(comptime f: ctype.Function) []const u8 {
 /// `ctorVariant`; D0, the deleting destructor, is never what a bound call wants.
 fn dtorVariant(comptime f: ctype.Function) []const u8 {
     return if (f.virtual_bases) "D1" else "D2";
+}
+
+/// A top-level cv-qualifier on a parameter is not part of the function type
+/// ([dcl.fct]: such qualifiers are deleted when forming the type), so Itanium
+/// encodes `f(char* const)` and `f(char*)` identically. Dropping it here also
+/// keeps one key per type in the substitution table.
+fn stripTopConst(comptime t: CType) CType {
+    return switch (t) {
+        .pointer => |p| .{ .pointer = .{ .child = p.child, .is_const = p.is_const } },
+        else => t,
+    };
 }
 
 fn sourceName(comptime name: []const u8) []const u8 {

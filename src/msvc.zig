@@ -125,7 +125,7 @@ fn mangleParam(comptime t: CType, comptime st: *State) []const u8 {
 fn mangleType(comptime t: CType, comptime st: *State, comptime self_const: bool) []const u8 {
     return switch (t) {
         .builtin => |b| builtinCode(b),
-        .pointer => |p| (if (self_const) "Q" else "P") ++ indirectSuffix(p.child, p.is_const, st),
+        .pointer => |p| (if (self_const or p.top_const) "Q" else "P") ++ indirectSuffix(p.child, p.is_const, st),
         .reference => |r| (if (r.rvalue) "$$Q" else "A") ++ indirectSuffix(r.child, r.is_const, st),
         .named => |n| kindCode(n.kind) ++ qualifiedName(n.path, st),
     };

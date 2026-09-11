@@ -74,8 +74,9 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        // For example...
-        //"LICENSE",
-        //"README.md",
+        // `addCppGlue` builds this from the dependency, so it has to ship.
+        "tools",
+        "LICENSE",
+        "README.md",
     },
 }

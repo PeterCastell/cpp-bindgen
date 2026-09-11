@@ -8,6 +8,7 @@ const Template = cpp.Template;
 const Kind = cpp.Kind;
 const Ref = cpp.Ref;
 const RRef = cpp.RRef;
+const ConstPtr = cpp.ConstPtr;
 const wchar_t = cpp.wchar_t;
 const char16_t = cpp.char16_t;
 const char32_t = cpp.char32_t;
@@ -182,6 +183,12 @@ const cases = [_]Case{
     .{ .sig = .{ .name = "ns::Counter::assign", .args = &.{Ref(*const Counter)}, .ret = c_int, .this = *Counter }, .itanium = "_ZN2ns7Counter6assignERKS0_", .msvc = "?assign@Counter@ns@@QEAAHAEBU12@@Z" },
     .{ .sig = .{ .name = "ns::ptr_ref", .args = &.{Ref(*const [*c]c_int)}, .ret = Ref(*const [*c]c_int) }, .itanium = "_ZN2ns7ptr_refERKPi", .msvc = "?ptr_ref@ns@@YAAEBQEAHAEBQEAH@Z" },
     .{ .sig = .{ .name = "ns::ptr_ptr", .args = &.{ *const [*c]c_int, *const [*c]const c_int }, .ret = c_int }, .itanium = "_ZN2ns7ptr_ptrEPKPiPKPKi", .msvc = "?ptr_ptr@ns@@YAHPEBQEAHPEBQEBH@Z" },
+    // `T* const`: Itanium drops the top-level qualifier, MSVC spells it `Q`.
+    .{ .sig = .{ .name = "ns::cptr_w", .args = &.{ConstPtr([*c]u8)}, .ret = c_int }, .itanium = "_ZN2ns6cptr_wEPc", .msvc = "?cptr_w@ns@@YAHQEAD@Z" },
+    .{ .sig = .{ .name = "ns::cptr_r", .args = &.{ConstPtr([*c]const u8)}, .ret = c_int }, .itanium = "_ZN2ns6cptr_rEPKc", .msvc = "?cptr_r@ns@@YAHQEBD@Z" },
+    // Only Itanium folds the two into one substitution; for MSVC they differ.
+    .{ .sig = .{ .name = "ns::cptr_mix", .args = &.{ ConstPtr([*c]u8), [*c]u8 }, .ret = c_int }, .itanium = "_ZN2ns8cptr_mixEPcS0_", .msvc = "?cptr_mix@ns@@YAHQEADPEAD@Z" },
+    .{ .sig = .{ .name = "ns::cptr_both", .args = &.{ ConstPtr([*c]const u8), ConstPtr([*c]const u8) }, .ret = c_int }, .itanium = "_ZN2ns9cptr_bothEPKcS1_", .msvc = "?cptr_both@ns@@YAHQEBD0@Z" },
     .{ .sig = .{ .name = "get", .ret = c_int, .this = *const Counter }, .itanium = "_ZNK2ns7Counter3getEv", .msvc = "?get@Counter@ns@@QEBAHXZ" },
     // Class-template specializations.
     .{ .sig = .{ .name = "pair_sum", .args = &.{Ref(*const PairInt)}, .ret = c_int }, .itanium = "_Z8pair_sumRK4PairIiE", .msvc = "?pair_sum@@YAHAEBU?$Pair@H@@@Z" },
@@ -345,6 +352,12 @@ test "reference parameters and returns" {
     const ptr_ref = bindFn(&.{Ref(*const [*c]c_int)}, Ref(*const [*c]c_int), "ns::ptr_ref");
     const p: [*c]c_int = &x;
     try std.testing.expectEqual(&p, ptr_ref(&p));
+
+    const cptr_w = bindFn(&.{ConstPtr([*c]u8)}, c_int, "ns::cptr_w");
+    const cptr_both = bindFn(&.{ ConstPtr([*c]const u8), ConstPtr([*c]const u8) }, c_int, "ns::cptr_both");
+    var ch: u8 = 7;
+    try std.testing.expectEqual(7, cptr_w(&ch));
+    try std.testing.expectEqual(14, cptr_both(&ch, &ch));
 
     const ptr_ptr = bindFn(&.{ *const [*c]c_int, *const [*c]const c_int }, c_int, "ns::ptr_ptr");
     const cp: [*c]const c_int = &two;

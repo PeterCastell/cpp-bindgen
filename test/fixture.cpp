@@ -57,6 +57,14 @@ namespace ns {
     int ptr_ptr(int* const* pp, const int* const* cpp) { return **pp + **cpp; }
 }
 
+// Const pointers. Itanium drops the top-level qualifier; MSVC mangles it.
+namespace ns {
+    int cptr_w(char* const p) { return p ? *p : 0; }
+    int cptr_r(const char* const p) { return p ? *p : 0; }
+    int cptr_mix(char* const a, char* b) { return (a ? *a : 0) + (b ? *b : 0); }
+    int cptr_both(const char* const a, const char* const b) { return (a ? *a : 0) + (b ? *b : 0); }
+}
+
 // Class-template specializations, explicitly instantiated.
 template<class T> struct Pair { T a, b; };
 int pair_sum(const Pair<int>& p) { return p.a + p.b; }

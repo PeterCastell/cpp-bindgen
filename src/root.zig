@@ -20,6 +20,7 @@ pub const char32_t = ctype.char32_t;
 pub const uchar = ctype.uchar;
 pub const Ref = ctype.Ref;
 pub const RRef = ctype.RRef;
+pub const ConstPtr = ctype.ConstPtr;
 pub const Template = ctype.Template;
 pub const TemplateArg = ctype.TemplateArg;
 pub const ClassAbi = ctype.ClassAbi;
@@ -43,8 +44,9 @@ pub const Signature = struct {
     /// free function in the same scope.
     class: ?type = null,
     /// Parameter types, excluding `this`. A C++ reference parameter is
-    /// written as `Ref(*T)` / `Ref(*const T)` / `RRef(*T)`; the bound
-    /// function then takes the plain pointer.
+    /// written as `Ref(*T)` / `Ref(*const T)` / `RRef(*T)`, and a `T* const`
+    /// parameter as `ConstPtr([*c]T)`; the bound function then takes the
+    /// plain pointer.
     args: []const type = &.{},
     /// Return type. May also be a `Ref`/`RRef` marker.
     ret: type = void,
