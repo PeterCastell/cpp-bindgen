@@ -9,6 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const ctype = @import("ctype.zig");
+pub const emit = @import("emit.zig");
 const itanium = @import("itanium.zig");
 const msvc = @import("msvc.zig");
 
@@ -105,19 +106,14 @@ fn visibleRet(comptime sig: Signature) type {
     return comptime if (classAbi(sig.ret) == .managed_copy) void else ctype.resolve(sig.ret);
 }
 
-/// Null unless `T` is a class type passed by value.
+/// Null unless `T` is a class type passed by value. `ctype.fromZig` has
+/// already rejected any non-extern struct or union.
 fn classAbi(comptime T: type) ?ClassAbi {
     return comptime blk: {
         const t = ctype.fromZig(T);
         if (t != .named) break :blk null;
-        if (t.named.abi != .managed_copy and t.named.kind != .@"enum") {
-            const ok = switch (@typeInfo(T)) {
-                .@"struct" => |st| st.layout == .@"extern",
-                .@"union" => |u| u.layout == .@"extern",
-                else => false,
-            };
-            if (!ok) @compileError(@typeName(T) ++ ": a class passed by value must be an extern struct/union (or declare cpp_abi = .managed_copy, which passes a pointer)");
-        }
+        if (t.named.abi != .managed_copy and @typeInfo(T) == .@"opaque")
+            @compileError(@typeName(T) ++ ": an opaque type has no size, so it cannot be passed by value; declare cpp_abi = .managed_copy, which passes a pointer");
         break :blk t.named.abi;
     };
 }
@@ -326,7 +322,9 @@ pub fn mangledName(comptime mangling: Mangling, comptime sig: Signature) []const
     };
 }
 
-fn describe(comptime sig: Signature) ctype.Function {
+/// The C++-level description of a signature, as the manglers and the glue
+/// emitter see it.
+pub fn describe(comptime sig: Signature) ctype.Function {
     comptime var params: []const ctype.CType = &.{};
     inline for (sig.args) |A| params = params ++ &[_]ctype.CType{ctype.fromZig(A)};
     const ret = ctype.fromZig(sig.ret);
@@ -389,6 +387,8 @@ fn thisOf(comptime name: []const u8, comptime Self: type) ctype.Function.This {
 
 test {
     _ = ctype;
+    _ = emit;
+    _ = @import("cppsrc.zig");
     _ = itanium;
     _ = msvc;
     _ = @import("testing.zig");

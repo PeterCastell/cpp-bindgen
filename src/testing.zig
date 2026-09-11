@@ -78,13 +78,26 @@ const Plain = extern struct {
     pub const cpp_name = "ns::Plain";
 };
 const Poly = extern struct {
-    vptr: *const anyopaque,
+    _vptr: *const anyopaque,
     n: c_int,
+    _tail: [4]u8,
     pub const cpp_name = "ns::Poly";
+    pub const cpp_abi: ClassAbi = .managed_copy;
     pub const cpp_virtual_dtor = true;
 };
-const Derived = opaque {
+/// `struct Derived : virtual VBase`. A virtual base sits where the ABI puts
+/// it, not where the declaration names it: both Itanium and MSVC place the
+/// `VBase` subobject last, behind `Derived`'s own vtable pointer and members.
+/// "test/fixture.cpp"'s `sizeof_derived` checks this at run time.
+const Derived = extern struct {
+    _vptr: *const anyopaque,
+    b: c_int,
+    _pad: [4]u8,
+    _vbase_vptr: *const anyopaque,
+    a: c_int,
+    _tail: [4]u8,
     pub const cpp_name = "ns::Derived";
+    pub const cpp_abi: ClassAbi = .managed_copy;
     pub const cpp_virtual_dtor = true;
     pub const cpp_virtual_bases = true;
 };
@@ -184,16 +197,16 @@ const cases = [_]Case{
     .{ .sig = .{ .name = "count", .ret = c_int, .this = *const ListVec3 }, .itanium = "_ZNK3tpl4ListINS_3vecILi3EfLNS_9qualifierE1EEENS_5AllocIS3_EEE5countEv", .msvc = "?count@?$List@U?$vec@$02M$00@tpl@@U?$Alloc@U?$vec@$02M$00@tpl@@@2@@tpl@@QEBAHXZ" },
     .{ .sig = .{ .name = "get", .ret = *TVec3, .this = *const BoxPtr }, .itanium = "_ZNK3tpl3BoxIPNS_3vecILi3EfLNS_9qualifierE1EEEE3getEv", .msvc = "?get@?$Box@PEAU?$vec@$02M$00@tpl@@@tpl@@QEBAPEAU?$vec@$02M$00@2@XZ" },
     .{ .sig = .{ .name = "get", .ret = u8, .this = *const BoxChar }, .itanium = "_ZNK3tpl3BoxIcE3getEv", .msvc = "?get@?$Box@D@tpl@@QEBADXZ" },
-    .{ .sig = .{ .name = "*", .args = &.{c_int}, .this = *Plain }, .itanium = "_ZN2ns5PlainC1Ei", .msvc = "??0Plain@ns@@QEAA@H@Z" },
-    .{ .sig = .{ .name = "ns::Plain::*", .args = &.{c_int}, .this = *Plain }, .itanium = "_ZN2ns5PlainC1Ei", .msvc = "??0Plain@ns@@QEAA@H@Z" },
-    .{ .sig = .{ .name = "~", .this = *Plain }, .itanium = "_ZN2ns5PlainD1Ev", .msvc = "??1Plain@ns@@QEAA@XZ" },
-    .{ .sig = .{ .name = "*", .this = *Poly }, .itanium = "_ZN2ns4PolyC1Ev", .msvc = "??0Poly@ns@@QEAA@XZ" },
-    .{ .sig = .{ .name = "~", .this = *Poly }, .itanium = "_ZN2ns4PolyD1Ev", .msvc = "??1Poly@ns@@UEAA@XZ" },
+    .{ .sig = .{ .name = "*", .args = &.{c_int}, .this = *Plain }, .itanium = "_ZN2ns5PlainC2Ei", .msvc = "??0Plain@ns@@QEAA@H@Z" },
+    .{ .sig = .{ .name = "ns::Plain::*", .args = &.{c_int}, .this = *Plain }, .itanium = "_ZN2ns5PlainC2Ei", .msvc = "??0Plain@ns@@QEAA@H@Z" },
+    .{ .sig = .{ .name = "~", .this = *Plain }, .itanium = "_ZN2ns5PlainD2Ev", .msvc = "??1Plain@ns@@QEAA@XZ" },
+    .{ .sig = .{ .name = "*", .this = *Poly }, .itanium = "_ZN2ns4PolyC2Ev", .msvc = "??0Poly@ns@@QEAA@XZ" },
+    .{ .sig = .{ .name = "~", .this = *Poly }, .itanium = "_ZN2ns4PolyD2Ev", .msvc = "??1Poly@ns@@UEAA@XZ" },
     .{ .sig = .{ .name = "f", .ret = c_int, .this = *Poly, .virtual = true }, .itanium = "_ZN2ns4Poly1fEv", .msvc = "?f@Poly@ns@@UEAAHXZ" },
     .{ .sig = .{ .name = "*", .args = &.{c_int}, .this = *Derived }, .itanium = "_ZN2ns7DerivedC1Ei", .msvc = "??0Derived@ns@@QEAA@H@Z" },
     .{ .sig = .{ .name = "~", .this = *Derived }, .itanium = "_ZN2ns7DerivedD1Ev", .msvc = "??_DDerived@ns@@QEAAXXZ" },
-    .{ .sig = .{ .name = "*", .args = &.{c_int}, .this = *CellInt }, .itanium = "_ZN3tpl4CellIiEC1Ei", .msvc = "??0?$Cell@H@tpl@@QEAA@H@Z" },
-    .{ .sig = .{ .name = "~", .this = *CellInt }, .itanium = "_ZN3tpl4CellIiED1Ev", .msvc = "??1?$Cell@H@tpl@@QEAA@XZ" },
+    .{ .sig = .{ .name = "*", .args = &.{c_int}, .this = *CellInt }, .itanium = "_ZN3tpl4CellIiEC2Ei", .msvc = "??0?$Cell@H@tpl@@QEAA@H@Z" },
+    .{ .sig = .{ .name = "~", .this = *CellInt }, .itanium = "_ZN3tpl4CellIiED2Ev", .msvc = "??1?$Cell@H@tpl@@QEAA@XZ" },
     // Classes by value.
     .{ .sig = .{ .name = "ns::vec_make", .args = &.{ c_int, c_int }, .ret = Vec2 }, .itanium = "_ZN2ns8vec_makeEii", .msvc = "?vec_make@ns@@YA?AUVec2@1@HH@Z" },
     .{ .sig = .{ .name = "ns::vec_dot", .args = &.{ Vec2, Vec2 }, .ret = c_int }, .itanium = "_ZN2ns7vec_dotENS_4Vec2ES0_", .msvc = "?vec_dot@ns@@YAHUVec2@1@0@Z" },
@@ -405,12 +418,14 @@ test "constructors and destructors" {
     const derived_sum = bindFn(&.{Ref(*const Derived)}, c_int, "ns::derived_sum");
     const derived_ctor = bindMethod(*Derived, &.{c_int}, void, "*");
     const derived_dtor = bindMethod(*Derived, &.{}, void, "~");
-    var storage: [64]u8 align(16) = undefined;
-    try std.testing.expect(sizeof_derived() <= storage.len);
-    const d: *Derived = @ptrCast(&storage);
-    derived_ctor(d, 7);
-    try std.testing.expectEqual(207, derived_sum(d));
-    derived_dtor(d);
+    try std.testing.expectEqual(@sizeOf(Derived), sizeof_derived());
+    var d: Derived = undefined;
+    derived_ctor(&d, 7);
+    try std.testing.expectEqual(207, derived_sum(&d));
+    // The members the Zig layout claims, read where it claims they are.
+    try std.testing.expectEqual(2, d.a);
+    try std.testing.expectEqual(7, d.b);
+    derived_dtor(&d);
 
     const cell_ctor = bindMethod(*CellInt, &.{c_int}, void, "*");
     const cell_dtor = bindMethod(*CellInt, &.{}, void, "~");

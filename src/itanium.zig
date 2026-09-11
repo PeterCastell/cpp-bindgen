@@ -47,8 +47,8 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
         };
         out = out ++ switch (f.special) {
             .none => qualified(f.path, false, &subs),
-            .ctor => qualified(f.path[0 .. f.path.len - 1], true, &subs) ++ "C1",
-            .dtor => qualified(f.path[0 .. f.path.len - 1], true, &subs) ++ "D1",
+            .ctor => qualified(f.path[0 .. f.path.len - 1], true, &subs) ++ ctorVariant(f),
+            .dtor => qualified(f.path[0 .. f.path.len - 1], true, &subs) ++ dtorVariant(f),
         };
         out = out ++ "E";
     }
@@ -59,6 +59,22 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
         inline for (f.params) |p| out = out ++ mangleType(p, &subs);
     }
     return out;
+}
+
+/// C1 is the complete-object constructor, C2 the base-object one. They differ
+/// only for a class with virtual bases, and only C2 is emitted for a class
+/// whose constructor is defined inline in a header: a compiler that sees no
+/// virtual bases calls C2 directly and never materialises C1. C2 is therefore
+/// the variant present in every translation unit that defines the class, so
+/// bind it unless virtual bases make the distinction real.
+fn ctorVariant(comptime f: ctype.Function) []const u8 {
+    return if (f.virtual_bases) "C1" else "C2";
+}
+
+/// D1 is the complete-object destructor, D2 the base-object one. See
+/// `ctorVariant`; D0, the deleting destructor, is never what a bound call wants.
+fn dtorVariant(comptime f: ctype.Function) []const u8 {
+    return if (f.virtual_bases) "D1" else "D2";
 }
 
 fn sourceName(comptime name: []const u8) []const u8 {

@@ -311,6 +311,14 @@ fn namedOf(comptime T: type) CType.Named {
         .@"union" => .@"union",
         else => .@"struct",
     };
+    // A C++ class has the field order its declaration gives it. Zig reorders
+    // the fields of a non-extern struct, so a type that stands for a C++ class
+    // must say `extern`, and its author must know the compiled layout.
+    switch (@typeInfo(T)) {
+        .@"struct" => |s| if (s.layout != .@"extern") @compileError(@typeName(T) ++ ": a Zig type that stands for a C++ class must be an extern struct, an extern union, an enum, or opaque"),
+        .@"union" => |u| if (u.layout != .@"extern") @compileError(@typeName(T) ++ ": a Zig type that stands for a C++ union must be an extern union"),
+        else => {},
+    }
     const abi: ClassAbi = if (@hasDecl(T, "cpp_abi")) T.cpp_abi else .c_struct;
     if (@hasDecl(T, "cpp_name") and @hasDecl(T, "cpp_template")) @compileError(@typeName(T) ++ ": declare either cpp_name or cpp_template, not both");
     if (@hasDecl(T, "cpp_template")) {

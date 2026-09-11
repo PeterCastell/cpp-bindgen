@@ -49,7 +49,9 @@ constructor, or a reference parameter. `mangledName` returns the symbol name alo
 
 ## Classes
 
-A Zig type describes its C++ class through public declarations:
+A Zig type describes its C++ class through public declarations. It must be an
+`extern struct`, an `extern union`, an enum, or `opaque`: a C++ class has the field
+order its declaration gives it, and Zig reorders the fields of a plain struct.
 
 - `cpp_name` — the qualified name, such as `"ns::Counter"`.
 - `cpp_template` — a `Template` value in place of `cpp_name`, for a specialization
@@ -57,7 +59,10 @@ A Zig type describes its C++ class through public declarations:
 - `cpp_kind` — struct, class, union, or enum. Only MSVC mangles this difference.
 - `cpp_abi` — how the ABI passes and returns the class by value. The three values are
   `.c_struct`, `.trivial_copy`, and `.managed_copy`.
-- `cpp_virtual_dtor` and `cpp_virtual_bases` — two more facts that MSVC mangles.
+- `cpp_virtual_dtor` — the destructor is virtual. Only MSVC mangles the difference.
+- `cpp_virtual_bases` — the class has virtual bases. MSVC mangles it; on Itanium it
+  also selects the complete-object constructor and destructor, since a class without
+  virtual bases binds the base-object ones.
 
 The default `cpp_abi` is `.c_struct`. That value is correct for plain data, and wrong
 for a class with a constructor, a destructor, or a virtual function. Declare the
@@ -65,7 +70,71 @@ value for every such class.
 
 Bind a constructor as a method named `"*"`, and a destructor as `"~"`. Both run on
 storage that you supply. The Zig type must have the size and the alignment of the C++
-object, because the library reads no headers.
+object, because the library reads no headers. `addCppGlue` checks that for you.
+
+## Glue
+
+`cpp-bindgen` can generate a C++ translation unit for your bindings. It does two
+things no Zig code can do for itself:
+
+- **It makes header-only definitions exist.** A class template specialization, an
+  inline function, an inline member: none of them has a symbol until some translation
+  unit emits one, and a header alone never does. The glue is that translation unit.
+- **It checks every layout fact your bindings assert**, in the C++ compiler, against
+  the real class: size, alignment, member offsets, and `cpp_abi` category. Those are
+  what a binding gets wrong, and a `static_assert` turns a silent memory corruption
+  into a compile error.
+
+Put a manifest in your bindings file. It names the headers to include and the modules
+to scan; scanning finds every public type that carries `cpp_name` or `cpp_template`,
+and every public `Signature` constant.
+
+```zig
+pub const Counter = extern struct {
+    n: c_int,
+    pub const cpp_name = "inl::Counter";
+};
+
+// Declare a Signature for anything header-only, and bind that same value: the
+// glue and the call can then never describe different functions.
+pub const get: cpp.Signature = .{ .name = "get", .ret = c_int, .this = *const Counter };
+
+pub const cpp_manifest: cpp.emit.Manifest = .{
+    .headers = &.{"counter.hpp"},
+    .modules = &.{@This()},
+};
+```
+
+Then wire it into `build.zig`:
+
+```zig
+const cpp_bindgen = @import("cpp_bindgen");
+const dep = b.dependency("cpp_bindgen", .{ .target = target });
+
+const bindings = b.createModule(.{ .root_source_file = b.path("src/bindings.zig"), .target = target });
+bindings.addImport("cpp_bindgen", dep.module("cpp_bindgen"));
+exe_mod.addImport("bindings", bindings);
+
+const glue = cpp_bindgen.addCppGlue(b, dep, .{ .bindings = bindings, .target = target });
+exe_mod.addCSourceFile(.{ .file = glue, .flags = cpp_bindgen.glue_flags });
+```
+
+The generated file goes through the cache; it never lands in your source tree. Compile
+it with `glue_flags`, and with the same headers and defines as the C++ it binds — the
+facts it checks are only the facts that will be linked if it sees the same
+declarations.
+
+Two declarations steer the glue, both on the Zig type:
+
+- `cpp_no_instantiate` — do not explicitly instantiate this specialization.
+  Instantiating a class template instantiates *every* member, including ones that do
+  not compile for these arguments, which is a real hazard for a standard-library
+  container.
+- `cpp_no_offsets` — check the size and the alignment but not the member offsets.
+
+A field whose name starts with `_` is skipped: that is how a binding spells a vtable
+pointer, a virtual base, or tail padding, none of which is a member `offsetof` can
+name.
 
 ## Limits
 
@@ -73,7 +142,10 @@ object, because the library reads no headers.
 - On AArch64, a function that returns a class through a hidden pointer fails to
   compile.
 - The library reads no headers. You write each signature, and you keep it correct
-  when the C++ changes.
+  when the C++ changes. The glue checks the types; it cannot check a signature.
+- The glue generator runs on the build machine, so it needs a target the build
+  machine can execute. It is built for the target rather than for the host because
+  the sizes it checks are the target's.
 
 ## Tests
 
@@ -82,9 +154,11 @@ zig build test
 ```
 
 The tests compile `test/fixture.cpp` into the test binary, so a wrong mangled name
-fails at link time. They also compare every name to a golden name from clang. On a
-Windows x86_64 host with MSVC and the Windows SDK, `zig build test-msvc` repeats the
-tests with the MSVC ABI.
+fails at link time. They also compare every name to a golden name from clang. A second
+test binary binds `test/inline_fixture.hpp`, which defines everything inline and so has
+no symbols of its own: it links only because the generated glue emitted them. On a
+Windows x86_64 host with MSVC and the Windows SDK, `zig build test-msvc` repeats both
+with the MSVC ABI.
 
 The library needs Zig 0.17.0-dev.1683+5ceec001b or later.
 
