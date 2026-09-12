@@ -39,7 +39,11 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
 
     // Special names: ?0 ctor, ?1 dtor, ?_D complete dtor with virtual bases.
     const vbase_dtor = f.special == .dtor and f.virtual_bases;
-    const special_name: ?[]const u8 = switch (f.special) {
+    const special_name: ?[]const u8 = if (f.op) |op|
+        // One code per spelling; MSVC leaves arity to the parameter list, and
+        // a conversion operator encodes its target as the return type.
+        op.msvc
+    else switch (f.special) {
         .none => null,
         .ctor => "?0",
         .dtor => if (vbase_dtor) "?_D" else "?1",

@@ -34,10 +34,17 @@ namespace ns {
         int addTo(const Counter* other) const;
         Counter* self();
         int assign(const Counter& other);
+        // MSVC returns this through a hidden pointer because it is an
+        // instance method; the same type from a free function goes in a
+        // register.
+        Vec2 asVec() const;
+        static Vec2 origin();
     };
     int Counter::get() const { return n; }
     void Counter::set(int v) { n = v; }
     int Counter::addTo(const Counter* other) const { return n + other->n; }
+    Vec2 Counter::asVec() const { return Vec2{n, n * 2}; }
+    Vec2 Counter::origin() { return Vec2{0, 0}; }
     Counter* Counter::self() { return this; }
     Vec2* make_vec(Vec2* out, int x, int y) { out->x = x; out->y = y; return out; }
     int vec_sum(const Vec2* v) { return v->x + v->y; }
@@ -99,6 +106,40 @@ namespace tpl {
     template<class T> T Box<T>::get() const { return val; }
     template struct Box<vec3*>;
     template struct Box<char>;
+}
+
+// Operator overloads. One spelling can be unary or binary, and only Itanium
+// gives each its own code; MSVC leaves arity to the parameter list.
+namespace ns {
+    struct Ops {
+        int x;
+        Ops operator+(const Ops& o) const;   // binary
+        Ops operator-() const;               // unary
+        Ops operator~() const;
+        Ops& operator+=(const Ops& o);
+        bool operator==(const Ops& o) const;
+        int& operator[](int i);
+        int operator()(int a, int b) const;
+        Ops operator++(int);                 // postfix
+        operator int() const;                // conversion
+        static void operator delete(void* p);
+    };
+    Ops Ops::operator+(const Ops& o) const { return Ops{x + o.x}; }
+    Ops Ops::operator-() const { return Ops{-x}; }
+    Ops Ops::operator~() const { return Ops{~x}; }
+    Ops& Ops::operator+=(const Ops& o) { x += o.x; return *this; }
+    bool Ops::operator==(const Ops& o) const { return x == o.x; }
+    int& Ops::operator[](int i) { (void)i; return x; }
+    int Ops::operator()(int a, int b) const { return a * 100 + b * 10 + x; }
+    Ops Ops::operator++(int) { Ops t = *this; x++; return t; }
+    Ops::operator int() const { return x; }
+    void Ops::operator delete(void* p) { (void)p; }
+
+    // Free operators: the same arity rule, one parameter fewer.
+    Ops operator*(const Ops& a, int k);
+    Ops operator*(const Ops& a, int k) { return Ops{a.x * k}; }
+    bool operator!(const Ops& a);
+    bool operator!(const Ops& a) { return !a.x; }
 }
 
 // Function templates. Itanium encodes the template's declared signature

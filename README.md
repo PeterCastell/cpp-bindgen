@@ -60,6 +60,37 @@ exists at run time: the bound function takes the pointer inside.
   constructors among them.
 - `TParam(0)` is the enclosing function template's first template parameter. See below.
 
+## Operators
+
+Name an operator by prefixing its C++ spelling with a colon. The colon is what keeps
+`":~"` (`operator~`) apart from `"~"` (the destructor), and `":*"` from `"*"` (the
+constructor).
+
+```zig
+const add = cpp.bind(.{ .name = ":+", .this = *const Vec, .args = &.{Ref(*const Vec)}, .ret = Vec });
+const at  = cpp.bind(.{ .name = ":[]", .this = *Vec, .args = &.{c_int}, .ret = Ref(*f32) });
+const del = cpp.bind(.{ .name = ":delete", .class = Vec, .args = &.{*anyopaque} });
+```
+
+The spellings are the C++ tokens: `:+ :- :* :& :/ :% :| :^ :<< :>> :~ :! := :+= :-=
+:*= :/= :%= :&= :|= :^= :<<= :>>= :== :!= :< :> :<= :>= :&& :|| :, :++ :-- :[] :()
+:-> :->* :new :delete :new[] :delete[]`, plus `:cast` for a conversion operator,
+whose target is its return type — `.name = ":cast", .ret = c_int` is `operator int`.
+
+A free operator takes a qualified name, so `ns::` followed by `:+` reads as a triple
+colon:
+
+```zig
+const mul = cpp.bind(.{ .name = "ns:::*", .args = &.{ Ref(*const Vec), f32 }, .ret = Vec });
+```
+
+**Arity is inferred, and it matters.** One spelling can be unary or binary, and
+Itanium gives each its own code — `operator-` is `mi` binary and `ng` unary — while
+MSVC uses one code and leaves arity to the parameter list. A method with no
+parameters is unary, as is a free function with one; write the parameters as C++
+declares them and the right code follows. Postfix `++` and `--` are the forms that
+take an unused `int`.
+
 ## Function templates
 
 A specialization of a function template has a template-mangled symbol. Give the
@@ -98,7 +129,10 @@ order its declaration gives it, and Zig reorders the fields of a plain struct.
   such as `tpl::vec<3, float, highp>`.
 - `cpp_kind` — struct, class, union, or enum. Only MSVC mangles this difference.
 - `cpp_abi` — how the ABI passes and returns the class by value. The three values are
-  `.c_struct`, `.trivial_copy`, and `.managed_copy`.
+  `.c_struct`, `.trivial_copy`, and `.managed_copy`. It is not the whole story for
+  returns: MSVC returns a class through a hidden pointer from *any* instance method,
+  whatever its size and however trivial it is, while a free or static function
+  returning the same class uses a register. The binder handles that for you.
 - `cpp_virtual_dtor` — the destructor is virtual. Only MSVC mangles the difference.
 - `cpp_virtual_bases` — the class has virtual bases. MSVC mangles it; on Itanium it
   also selects the complete-object constructor and destructor, since a class without

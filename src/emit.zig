@@ -428,6 +428,22 @@ test "render instantiates a specialization and forces a constructor" {
     try expectContains(out, "static_assert(!(__is_trivially_constructible(cppbindgen_t0, cppbindgen_t0 const&)");
 }
 
+test "render names an operator the way C++ spells it" {
+    const mod = struct {
+        pub const V = extern struct {
+            x: c_int,
+            pub const cpp_name = "ns::V";
+            pub const add: Signature = .{ .name = ":+", .this = *const @This(), .args = &.{cpp.Ref(*const @This())}, .ret = c_int };
+            pub const index: Signature = .{ .name = ":[]", .this = *@This(), .args = &.{c_int}, .ret = c_int };
+            pub const to_int: Signature = .{ .name = ":cast", .this = *const @This(), .ret = c_int };
+        };
+    };
+    const out = comptime render(.{ .modules = &.{mod} });
+    try expectContains(out, "int (ns::V::*cppbindgen_f0)(ns::V const&) const = &ns::V::operator+;");
+    try expectContains(out, "int (ns::V::*cppbindgen_f1)(int) = &ns::V::operator[];");
+    try expectContains(out, "int (ns::V::*cppbindgen_f2)() const = &ns::V::operator int;");
+}
+
 test "render follows public re-exports" {
     const inner = struct {
         pub const Vec = extern struct {

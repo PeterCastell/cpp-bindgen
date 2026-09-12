@@ -9,6 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const ctype = @import("ctype.zig");
+const cppsrc = @import("cppsrc.zig");
 pub const emit = @import("emit.zig");
 const itanium = @import("itanium.zig");
 const msvc = @import("msvc.zig");
@@ -22,6 +23,7 @@ pub const Ref = ctype.Ref;
 pub const RRef = ctype.RRef;
 pub const ConstPtr = ctype.ConstPtr;
 pub const TParam = ctype.TParam;
+pub const Op = ctype.Op;
 pub const Template = ctype.Template;
 pub const TemplateArg = ctype.TemplateArg;
 pub const ClassAbi = ctype.ClassAbi;
@@ -170,6 +172,12 @@ fn classAbi(comptime T: type) ?ClassAbi {
     };
 }
 
+/// A class type, as opposed to an enum, which `classAbi` also accepts.
+fn isClass(comptime T: type) bool {
+    const t = comptime ctype.fromZig(T);
+    return t == .named and t.named.kind != .@"enum";
+}
+
 /// Binds a C++ function or method by its signature, using the target's
 /// mangling.
 pub fn bind(comptime sig: Signature) *const FnType(sig) {
@@ -218,7 +226,13 @@ const Plan = struct {
 
 fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: ctype.Function) Plan {
     const managed_ret = classAbi(sig.ret) == .managed_copy;
-    const hidden_ret = managed_ret or (mangling == .msvc and classAbi(sig.ret) == .trivial_copy);
+    // MSVC returns a class through a hidden pointer from any instance member
+    // function, whatever its size and however trivial it is; a free or static
+    // function returning the same class uses a register. `.trivial_copy` is
+    // indirect either way.
+    const msvc_hidden = mangling == .msvc and
+        (classAbi(sig.ret) == .trivial_copy or (sig.this != null and isClass(sig.ret)));
+    const hidden_ret = managed_ret or msvc_hidden;
     if (hidden_ret and builtin.cpu.arch.isAARCH64())
         @compileError(sig.name ++ ": returning a class through a hidden pointer is not supported on AArch64 yet (the pointer goes in x8)");
 
@@ -380,9 +394,10 @@ pub fn mangledName(comptime mangling: Mangling, comptime sig: Signature) []const
 pub fn describe(comptime sig: Signature) ctype.Function {
     comptime var params: []const ctype.CType = &.{};
     inline for (sig.args) |A| params = params ++ &[_]ctype.CType{ctype.fromZig(A)};
-    const ret = ctype.fromZig(sig.ret);
 
-    const path = templated(sig, pathOf(sig));
+    const ret = ctype.fromZig(sig.ret);
+    const named = operatorOf(sig, templated(sig, pathOf(sig)), ret);
+    const path = named.path;
     const last = path[path.len - 1].name;
     const special: ctype.Function.Special = if (std.mem.eql(u8, last, "*")) .ctor else if (std.mem.eql(u8, last, "~")) .dtor else .none;
 
@@ -393,6 +408,7 @@ pub fn describe(comptime sig: Signature) ctype.Function {
         .this = if (sig.this) |Self| thisOf(sig.name, Self) else null,
         .is_static = sig.this == null and sig.class != null,
         .special = special,
+        .op = named.op,
         .is_virtual = sig.virtual,
     };
     if (sig.this) |Self| {
@@ -408,6 +424,22 @@ pub fn describe(comptime sig: Signature) ctype.Function {
         if (special == .dtor and sig.args.len != 0) @compileError(sig.name ++ ": a destructor takes no arguments");
     }
     return f;
+}
+
+/// Recognises a `":..."` name. The component keeps the C++ spelling, which
+/// is what the glue writes; the `Op` goes on the function for the manglers.
+fn operatorOf(comptime sig: Signature, comptime path: []const ctype.Component, comptime ret: ctype.CType) struct { path: []const ctype.Component, op: ?ctype.Op } {
+    const last = path[path.len - 1];
+    if (last.name.len < 2 or last.name[0] != ':') return .{ .path = path, .op = null };
+    const op = ctype.findOperator(last.name[1..]) orelse
+        @compileError(sig.name ++ ": '" ++ last.name ++ "' is not an operator; the spellings are " ++ ctype.operatorList());
+    if (last.args.len > 0) @compileError(sig.name ++ ": an operator cannot take explicit template arguments");
+    // `operator int`, `operator ns::Vec2 const*`: the target is the return type.
+    const cpp = if (op.conversion) op.cpp ++ " " ++ cppsrc.typeName(ret) else op.cpp;
+    return .{
+        .path = path[0 .. path.len - 1] ++ &[_]ctype.Component{.{ .name = cpp }},
+        .op = op,
+    };
 }
 
 /// Attaches `template_args` to the function's own name component, which is

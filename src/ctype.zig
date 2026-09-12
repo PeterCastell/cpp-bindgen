@@ -242,6 +242,88 @@ pub const Arg = union(enum) {
     }
 };
 
+/// An overloadable operator. A signature names one by prefixing its C++
+/// spelling with a colon: `":+"`, `":[]"`, `":delete"`. The colon is what
+/// keeps `":~"` (`operator~`) apart from `"~"` (the destructor), and `":*"`
+/// from `"*"` (the constructor).
+pub const Op = struct {
+    /// How C++ source spells it, for the glue.
+    cpp: []const u8,
+    /// Itanium code for the binary form, or for the only form there is.
+    itanium: []const u8,
+    /// Itanium code for the unary form, where one spelling serves both.
+    /// MSVC uses a single code and leaves arity to the parameter list.
+    itanium_unary: ?[]const u8 = null,
+    msvc: []const u8,
+    /// A conversion operator: Itanium puts the target type in the name.
+    conversion: bool = false,
+};
+
+/// Every operator `bind` understands, keyed by the spelling after the colon.
+/// The codes were read off clang's output for both ABIs.
+const operators = [_]struct { name: []const u8, op: Op }{
+    .{ .name = "+", .op = .{ .cpp = "operator+", .itanium = "pl", .itanium_unary = "ps", .msvc = "?H" } },
+    .{ .name = "-", .op = .{ .cpp = "operator-", .itanium = "mi", .itanium_unary = "ng", .msvc = "?G" } },
+    .{ .name = "*", .op = .{ .cpp = "operator*", .itanium = "ml", .itanium_unary = "de", .msvc = "?D" } },
+    .{ .name = "&", .op = .{ .cpp = "operator&", .itanium = "an", .itanium_unary = "ad", .msvc = "?I" } },
+    .{ .name = "/", .op = .{ .cpp = "operator/", .itanium = "dv", .msvc = "?K" } },
+    .{ .name = "%", .op = .{ .cpp = "operator%", .itanium = "rm", .msvc = "?L" } },
+    .{ .name = "|", .op = .{ .cpp = "operator|", .itanium = "or", .msvc = "?U" } },
+    .{ .name = "^", .op = .{ .cpp = "operator^", .itanium = "eo", .msvc = "?T" } },
+    .{ .name = "<<", .op = .{ .cpp = "operator<<", .itanium = "ls", .msvc = "?6" } },
+    .{ .name = ">>", .op = .{ .cpp = "operator>>", .itanium = "rs", .msvc = "?5" } },
+    .{ .name = "~", .op = .{ .cpp = "operator~", .itanium = "co", .msvc = "?S" } },
+    .{ .name = "!", .op = .{ .cpp = "operator!", .itanium = "nt", .msvc = "?7" } },
+    .{ .name = "=", .op = .{ .cpp = "operator=", .itanium = "aS", .msvc = "?4" } },
+    .{ .name = "+=", .op = .{ .cpp = "operator+=", .itanium = "pL", .msvc = "?Y" } },
+    .{ .name = "-=", .op = .{ .cpp = "operator-=", .itanium = "mI", .msvc = "?Z" } },
+    .{ .name = "*=", .op = .{ .cpp = "operator*=", .itanium = "mL", .msvc = "?X" } },
+    .{ .name = "/=", .op = .{ .cpp = "operator/=", .itanium = "dV", .msvc = "?_0" } },
+    .{ .name = "%=", .op = .{ .cpp = "operator%=", .itanium = "rM", .msvc = "?_1" } },
+    .{ .name = "&=", .op = .{ .cpp = "operator&=", .itanium = "aN", .msvc = "?_4" } },
+    .{ .name = "|=", .op = .{ .cpp = "operator|=", .itanium = "oR", .msvc = "?_5" } },
+    .{ .name = "^=", .op = .{ .cpp = "operator^=", .itanium = "eO", .msvc = "?_6" } },
+    .{ .name = "<<=", .op = .{ .cpp = "operator<<=", .itanium = "lS", .msvc = "?_3" } },
+    .{ .name = ">>=", .op = .{ .cpp = "operator>>=", .itanium = "rS", .msvc = "?_2" } },
+    .{ .name = "==", .op = .{ .cpp = "operator==", .itanium = "eq", .msvc = "?8" } },
+    .{ .name = "!=", .op = .{ .cpp = "operator!=", .itanium = "ne", .msvc = "?9" } },
+    .{ .name = "<", .op = .{ .cpp = "operator<", .itanium = "lt", .msvc = "?M" } },
+    .{ .name = ">", .op = .{ .cpp = "operator>", .itanium = "gt", .msvc = "?O" } },
+    .{ .name = "<=", .op = .{ .cpp = "operator<=", .itanium = "le", .msvc = "?N" } },
+    .{ .name = ">=", .op = .{ .cpp = "operator>=", .itanium = "ge", .msvc = "?P" } },
+    .{ .name = "&&", .op = .{ .cpp = "operator&&", .itanium = "aa", .msvc = "?V" } },
+    .{ .name = "||", .op = .{ .cpp = "operator||", .itanium = "oo", .msvc = "?W" } },
+    .{ .name = ",", .op = .{ .cpp = "operator,", .itanium = "cm", .msvc = "?Q" } },
+    // `++`/`--` take an unused `int` in their postfix form, which is how both
+    // manglings tell the two apart; the code is the same.
+    .{ .name = "++", .op = .{ .cpp = "operator++", .itanium = "pp", .msvc = "?E" } },
+    .{ .name = "--", .op = .{ .cpp = "operator--", .itanium = "mm", .msvc = "?F" } },
+    .{ .name = "[]", .op = .{ .cpp = "operator[]", .itanium = "ix", .msvc = "?A" } },
+    .{ .name = "()", .op = .{ .cpp = "operator()", .itanium = "cl", .msvc = "?R" } },
+    .{ .name = "->", .op = .{ .cpp = "operator->", .itanium = "pt", .msvc = "?C" } },
+    .{ .name = "->*", .op = .{ .cpp = "operator->*", .itanium = "pm", .msvc = "?J" } },
+    .{ .name = "new", .op = .{ .cpp = "operator new", .itanium = "nw", .msvc = "?2" } },
+    .{ .name = "delete", .op = .{ .cpp = "operator delete", .itanium = "dl", .msvc = "?3" } },
+    .{ .name = "new[]", .op = .{ .cpp = "operator new[]", .itanium = "na", .msvc = "?_U" } },
+    .{ .name = "delete[]", .op = .{ .cpp = "operator delete[]", .itanium = "da", .msvc = "?_V" } },
+    // A conversion operator's target is its return type: `":cast"` with
+    // `.ret = c_int` is `operator int`.
+    .{ .name = "cast", .op = .{ .cpp = "operator", .itanium = "cv", .msvc = "?B", .conversion = true } },
+};
+
+/// The operator a `":..."` name refers to, or null.
+pub fn findOperator(comptime spelling: []const u8) ?Op {
+    inline for (operators) |e| if (std.mem.eql(u8, e.name, spelling)) return e.op;
+    return null;
+}
+
+/// Every spelling, for an error message.
+pub fn operatorList() []const u8 {
+    comptime var out: []const u8 = "";
+    inline for (operators, 0..) |e, i| out = out ++ (if (i == 0) "" else " ") ++ ":" ++ e.name;
+    return out;
+}
+
 /// A function to mangle. `params` excludes `this`; the last path component
 /// is the function name (ignored for ctors/dtors, see `special`).
 pub const Function = struct {
@@ -251,6 +333,9 @@ pub const Function = struct {
     this: ?This = null,
     is_static: bool = false,
     special: Special = .none,
+    /// Set when the last path component names an operator. The component
+    /// itself carries the C++ spelling, so only the manglers need this.
+    op: ?Op = null,
     is_virtual: bool = false,
     virtual_bases: bool = false,
 

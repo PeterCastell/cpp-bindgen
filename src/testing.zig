@@ -30,6 +30,11 @@ const Vec2 = extern struct {
     pub const cpp_name = "ns::Vec2";
 };
 
+const Ops = extern struct {
+    x: c_int,
+    pub const cpp_name = "ns::Ops";
+};
+
 const Tpl = extern struct {
     n: c_int,
     pub const cpp_name = "ns::Tpl";
@@ -195,6 +200,27 @@ const cases = [_]Case{
     // Only Itanium folds the two into one substitution; for MSVC they differ.
     .{ .sig = .{ .name = "ns::cptr_mix", .args = &.{ ConstPtr([*c]u8), [*c]u8 }, .ret = c_int }, .itanium = "_ZN2ns8cptr_mixEPcS0_", .msvc = "?cptr_mix@ns@@YAHQEADPEAD@Z" },
     .{ .sig = .{ .name = "ns::cptr_both", .args = &.{ ConstPtr([*c]const u8), ConstPtr([*c]const u8) }, .ret = c_int }, .itanium = "_ZN2ns9cptr_bothEPKcS1_", .msvc = "?cptr_both@ns@@YAHQEBD0@Z" },
+    // MSVC returns a class from an instance method through a hidden pointer,
+    // and from a static one in a register; Itanium uses a register for both.
+    .{ .sig = .{ .name = "asVec", .this = *const Counter, .ret = Vec2 }, .itanium = "_ZNK2ns7Counter5asVecEv", .msvc = "?asVec@Counter@ns@@QEBA?AUVec2@2@XZ" },
+    .{ .sig = .{ .name = "origin", .class = Counter, .ret = Vec2 }, .itanium = "_ZN2ns7Counter6originEv", .msvc = "?origin@Counter@ns@@SA?AUVec2@2@XZ" },
+    // Operators. Itanium gives the unary and binary forms of one spelling
+    // different codes; MSVC uses one code and tells them apart by arity.
+    .{ .sig = .{ .name = ":+", .this = *const Ops, .args = &.{Ref(*const Ops)}, .ret = Ops }, .itanium = "_ZNK2ns3OpsplERKS0_", .msvc = "??HOps@ns@@QEBA?AU01@AEBU01@@Z" },
+    .{ .sig = .{ .name = ":-", .this = *const Ops, .ret = Ops }, .itanium = "_ZNK2ns3OpsngEv", .msvc = "??GOps@ns@@QEBA?AU01@XZ" },
+    .{ .sig = .{ .name = ":~", .this = *const Ops, .ret = Ops }, .itanium = "_ZNK2ns3OpscoEv", .msvc = "??SOps@ns@@QEBA?AU01@XZ" },
+    .{ .sig = .{ .name = ":+=", .this = *Ops, .args = &.{Ref(*const Ops)}, .ret = Ref(*Ops) }, .itanium = "_ZN2ns3OpspLERKS0_", .msvc = "??YOps@ns@@QEAAAEAU01@AEBU01@@Z" },
+    .{ .sig = .{ .name = ":==", .this = *const Ops, .args = &.{Ref(*const Ops)}, .ret = bool }, .itanium = "_ZNK2ns3OpseqERKS0_", .msvc = "??8Ops@ns@@QEBA_NAEBU01@@Z" },
+    .{ .sig = .{ .name = ":[]", .this = *Ops, .args = &.{c_int}, .ret = Ref(*c_int) }, .itanium = "_ZN2ns3OpsixEi", .msvc = "??AOps@ns@@QEAAAEAHH@Z" },
+    .{ .sig = .{ .name = ":()", .this = *const Ops, .args = &.{ c_int, c_int }, .ret = c_int }, .itanium = "_ZNK2ns3OpsclEii", .msvc = "??ROps@ns@@QEBAHHH@Z" },
+    // Postfix `++` is the one that takes an unused int.
+    .{ .sig = .{ .name = ":++", .this = *Ops, .args = &.{c_int}, .ret = Ops }, .itanium = "_ZN2ns3OpsppEi", .msvc = "??EOps@ns@@QEAA?AU01@H@Z" },
+    // A conversion operator's target is its return type.
+    .{ .sig = .{ .name = ":cast", .this = *const Ops, .ret = c_int }, .itanium = "_ZNK2ns3OpscviEv", .msvc = "??BOps@ns@@QEBAHXZ" },
+    .{ .sig = .{ .name = ":delete", .class = Ops, .args = &.{*anyopaque} }, .itanium = "_ZN2ns3OpsdlEPv", .msvc = "??3Ops@ns@@SAXPEAX@Z" },
+    // Free operators, `ns::` followed by `:*`. One parameter fewer decides arity.
+    .{ .sig = .{ .name = "ns:::*", .args = &.{ Ref(*const Ops), c_int }, .ret = Ops }, .itanium = "_ZN2nsmlERKNS_3OpsEi", .msvc = "??Dns@@YA?AUOps@0@AEBU10@H@Z" },
+    .{ .sig = .{ .name = "ns:::!", .args = &.{Ref(*const Ops)}, .ret = bool }, .itanium = "_ZN2nsntERKNS_3OpsE", .msvc = "??7ns@@YA_NAEBUOps@0@@Z" },
     // Function templates. Itanium spells the declared parameter (`RKT_`) and
     // adds the return type; MSVC spells the substituted one.
     .{ .sig = .{ .name = "ns::tpl_id", .template_args = &.{.{ .type = c_int }}, .args = &.{Ref(*const TParam(0))}, .ret = c_int }, .itanium = "_ZN2ns6tpl_idIiEEiRKT_", .msvc = "??$tpl_id@H@ns@@YAHAEBH@Z" },
@@ -568,4 +594,45 @@ test "function template specializations" {
     const make = cpp.bind(.{ .name = "make", .class = Tpl, .template_args = int_arg, .args = &.{Ref(*const TParam(0))}, .ret = c_int });
     var three: c_int = 3;
     try std.testing.expectEqual(9, make(&three));
+}
+
+test "a class returned from a method" {
+    const as_vec = cpp.bind(.{ .name = "asVec", .this = *const Counter, .ret = Vec2 });
+    const origin = cpp.bind(.{ .name = "origin", .class = Counter, .ret = Vec2 });
+    const c = Counter{ .n = 6 };
+    try std.testing.expectEqual(Vec2{ .x = 6, .y = 12 }, as_vec(&c));
+    try std.testing.expectEqual(Vec2{ .x = 0, .y = 0 }, origin());
+}
+
+test "operator overloads" {
+    const add = cpp.bind(.{ .name = ":+", .this = *const Ops, .args = &.{Ref(*const Ops)}, .ret = Ops });
+    const neg = cpp.bind(.{ .name = ":-", .this = *const Ops, .ret = Ops });
+    const not = cpp.bind(.{ .name = ":~", .this = *const Ops, .ret = Ops });
+    const add_assign = cpp.bind(.{ .name = ":+=", .this = *Ops, .args = &.{Ref(*const Ops)}, .ret = Ref(*Ops) });
+    const eq = cpp.bind(.{ .name = ":==", .this = *const Ops, .args = &.{Ref(*const Ops)}, .ret = bool });
+    const index = cpp.bind(.{ .name = ":[]", .this = *Ops, .args = &.{c_int}, .ret = Ref(*c_int) });
+    const call = cpp.bind(.{ .name = ":()", .this = *const Ops, .args = &.{ c_int, c_int }, .ret = c_int });
+    const post_inc = cpp.bind(.{ .name = ":++", .this = *Ops, .args = &.{c_int}, .ret = Ops });
+    const to_int = cpp.bind(.{ .name = ":cast", .this = *const Ops, .ret = c_int });
+    const scale = cpp.bind(.{ .name = "ns:::*", .args = &.{ Ref(*const Ops), c_int }, .ret = Ops });
+    const is_zero = cpp.bind(.{ .name = "ns:::!", .args = &.{Ref(*const Ops)}, .ret = bool });
+
+    var a: Ops = .{ .x = 3 };
+    const b: Ops = .{ .x = 4 };
+    try std.testing.expectEqual(Ops{ .x = 7 }, add(&a, &b));
+    try std.testing.expectEqual(Ops{ .x = -3 }, neg(&a));
+    try std.testing.expectEqual(Ops{ .x = ~@as(c_int, 3) }, not(&a));
+    try std.testing.expectEqual(true, eq(&a, &Ops{ .x = 3 }));
+    try std.testing.expectEqual(323, call(&a, 3, 2));
+    try std.testing.expectEqual(3, to_int(&a));
+    try std.testing.expectEqual(Ops{ .x = 15 }, scale(&a, 5));
+    try std.testing.expectEqual(false, is_zero(&a));
+    try std.testing.expectEqual(true, is_zero(&Ops{ .x = 0 }));
+
+    try std.testing.expectEqual(Ops{ .x = 3 }, post_inc(&a, 0));
+    try std.testing.expectEqual(4, a.x);
+    index(&a, 0).* = 9;
+    try std.testing.expectEqual(9, a.x);
+    try std.testing.expectEqual(&a, add_assign(&a, &b));
+    try std.testing.expectEqual(13, a.x);
 }

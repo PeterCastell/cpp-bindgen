@@ -40,7 +40,16 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
     const is_template = last.args.len > 0;
     if (is_template and f.special != .none) @compileError("a constructor or destructor cannot be a template: '" ++ ctype.pathKey(f.path) ++ "'");
 
-    if (f.path.len == 1) {
+    if (f.op) |op| {
+        // An operator's code stands where the unqualified name would, inside
+        // the nesting when there is one.
+        const code = opCode(op, f, &subs);
+        out = out ++ if (f.path.len == 1)
+            code
+        else
+            "N" ++ (if (f.this) |t| (if (t.is_const) "K" else "") else "") ++
+                qualified(f.path[0 .. f.path.len - 1], true, &subs) ++ code ++ "E";
+    } else if (f.path.len == 1) {
         out = out ++ sourceName(last.name);
         if (is_template) out = out ++ templateArgs(last.args, &subs);
     } else {
@@ -66,6 +75,16 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
         inline for (f.params) |p| out = out ++ mangleType(stripTopConst(p), &subs);
     }
     return out;
+}
+
+/// One spelling can be both unary and binary, and Itanium gives each its own
+/// code; the arity decides, exactly as it does in C++. A conversion operator
+/// carries its target type instead.
+fn opCode(comptime op: ctype.Op, comptime f: ctype.Function, comptime subs: *Subs) []const u8 {
+    if (op.conversion) return op.itanium ++ mangleType(f.ret, subs);
+    const unary = if (f.this != null) f.params.len == 0 else f.params.len == 1;
+    if (unary) if (op.itanium_unary) |u| return u;
+    return op.itanium;
 }
 
 /// C1 is the complete-object constructor, C2 the base-object one. They differ
