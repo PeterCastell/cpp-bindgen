@@ -23,13 +23,25 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-/// How to generate a C++ glue translation unit for a bindings module. See
-/// `src/emit.zig` for what ends up in it.
+/// How to generate the C++ glue for a bindings module. See `src/emit.zig` for
+/// what ends up in it.
 pub const GlueOptions = struct {
-    /// The module whose root source file declares `pub const cpp_manifest`.
-    /// Pass the same module object the bindings are imported from: a source
-    /// file may belong to only one module.
-    bindings: *std.Build.Module,
+    /// The module the generated C++ is compiled into. It inherits that
+    /// module's include paths, which is what lets the glue find the headers.
+    attach_to: *std.Build.Module,
+    /// Where the scan starts. Pass the same module object your own code
+    /// imports the bindings from: a source file may belong to only one
+    /// module. Files it publicly re-exports are scanned too, so
+    /// `pub const string = @import("string.zig");` is all a second binding
+    /// file needs.
+    binding_module: *std.Build.Module,
+    /// `#include` lines for the glue, verbatim and in order. A bare name is
+    /// quoted; one already spelled `<vector>` or `"x.h"` is taken as written.
+    headers: []const []const u8 = &.{},
+    /// Extra flags for the glue, appended to the mandatory ones. Give it the
+    /// same defines as the rest of your C++: the facts it checks are only the
+    /// facts that will be linked if it sees the same declarations.
+    flags: []const []const u8 = &.{},
     /// The target the glue is generated for. The generator runs on the build
     /// machine, so this has to be a target the build machine can execute; it
     /// is built for the target rather than for the host because the sizes and
@@ -38,8 +50,9 @@ pub const GlueOptions = struct {
     name: []const u8 = "cpp-glue",
 };
 
-/// Generates the glue for a bindings module and returns its path, ready for
-/// `Module.addCSourceFile`. Compile it with `glue_flags`.
+/// Generates the C++ glue for a bindings module and compiles it into
+/// `attach_to`. The bindings themselves hold nothing but types and
+/// signatures; everything the glue needs is here.
 ///
 /// ```zig
 /// const cpp_bindgen = @import("cpp_bindgen");            // in build.zig
@@ -49,25 +62,58 @@ pub const GlueOptions = struct {
 /// bindings.addImport("cpp_bindgen", dep.module("cpp_bindgen"));
 /// exe_mod.addImport("bindings", bindings);
 ///
-/// const glue = cpp_bindgen.addCppGlue(b, dep, .{ .bindings = bindings, .target = target });
-/// exe_mod.addCSourceFile(.{ .file = glue, .flags = cpp_bindgen.glue_flags });
+/// cpp_bindgen.addCppGlue(b, dep, .{
+///     .attach_to = exe_mod,
+///     .binding_module = bindings,
+///     .headers = &.{"ofMain.h"},
+///     .target = target,
+/// });
 /// ```
-pub fn addCppGlue(b: *std.Build, dep: *std.Build.Dependency, opts: GlueOptions) std.Build.LazyPath {
-    return generateGlue(b, dep.path("tools/emit.zig"), dep.module("cpp_bindgen"), opts);
+pub fn addCppGlue(b: *std.Build, dep: *std.Build.Dependency, opts: GlueOptions) void {
+    generateGlue(b, dep.path("tools/emit.zig"), dep.module("cpp_bindgen"), opts);
 }
 
 /// `-fno-inline` is load-bearing: a constructor has no address to take, so the
 /// glue can only name one by constructing an object, and an optimizer that
 /// inlines that call drops the out-of-line copy the linker needs.
-pub const glue_flags: []const []const u8 = &.{ "-std=c++17", "-fno-inline", "-Wno-invalid-offsetof" };
+const glue_flags: []const []const u8 = &.{ "-std=c++17", "-fno-inline", "-Wno-invalid-offsetof" };
 
-fn generateGlue(b: *std.Build, tool: std.Build.LazyPath, cpp_bindgen: *std.Build.Module, opts: GlueOptions) std.Build.LazyPath {
+fn generateGlue(b: *std.Build, tool: std.Build.LazyPath, cpp_bindgen: *std.Build.Module, opts: GlueOptions) void {
+    // The manifest is generated rather than written by hand, so a binding
+    // file carries no build metadata at all.
+    const manifest = b.createModule(.{ .root_source_file = writeManifest(b, opts), .target = opts.target });
+    manifest.addImport("cpp_bindgen", cpp_bindgen);
+    manifest.addImport("bindings", opts.binding_module);
+
     const gen = b.createModule(.{ .root_source_file = tool, .target = opts.target });
     gen.addImport("cpp_bindgen", cpp_bindgen);
-    gen.addImport("bindings", opts.bindings);
+    gen.addImport("manifest", manifest);
 
     const run = b.addRunArtifact(b.addExecutable(.{ .name = opts.name, .root_module = gen }));
-    return run.addOutputFileArg("cpp_glue.cpp");
+    const glue = run.addOutputFileArg("cpp_glue.cpp");
+
+    const flags = b.allocator.alloc([]const u8, glue_flags.len + opts.flags.len) catch @panic("OOM");
+    @memcpy(flags[0..glue_flags.len], glue_flags);
+    @memcpy(flags[glue_flags.len..], opts.flags);
+    opts.attach_to.addCSourceFile(.{ .file = glue, .flags = flags });
+}
+
+fn writeManifest(b: *std.Build, opts: GlueOptions) std.Build.LazyPath {
+    var text: []const u8 =
+        \\// Generated by cpp-bindgen's build.zig. Do not edit.
+        \\const cpp = @import("cpp_bindgen");
+        \\
+        \\pub const cpp_manifest: cpp.emit.Manifest = .{
+        \\    .headers = &.{
+        \\
+    ;
+    for (opts.headers) |h| text = b.fmt("{s}        \"{f}\",\n", .{ text, std.zig.fmtString(h) });
+    return b.addWriteFiles().add("cpp_manifest.zig", b.fmt(
+        \\{s}    }},
+        \\    .modules = &.{{@import("bindings")}},
+        \\}};
+        \\
+    , .{text}));
 }
 
 fn addTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, name: []const u8) *std.Build.Step {
@@ -104,12 +150,6 @@ fn addGlueTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const bindings = b.createModule(.{ .root_source_file = b.path("test/inline_fixture.zig"), .target = target });
     bindings.addImport("cpp_bindgen", lib);
 
-    const glue = generateGlue(b, b.path("tools/emit.zig"), lib, .{
-        .bindings = bindings,
-        .target = target,
-        .name = b.fmt("{s}-glue", .{name}),
-    });
-
     const mod = b.createModule(.{
         .root_source_file = b.path("test/inline_test.zig"),
         .target = target,
@@ -119,8 +159,23 @@ fn addGlueTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     mod.addImport("cpp_bindgen", lib);
     mod.addImport("inline_fixture", bindings);
     mod.addIncludePath(b.path("test"));
-    const msvc_flags: []const []const u8 = glue_flags ++ &[_][]const u8{ "-fno-autolink", "-fno-rtti" };
-    mod.addCSourceFile(.{ .file = glue, .flags = if (is_msvc) msvc_flags else glue_flags });
+
+    // This build links no C++ runtime, because the MSVC one is not on a
+    // search path Zig sets up; `Shape`'s virtual destructor needs the
+    // deleting form, which calls `operator delete`.
+    if (is_msvc) mod.addCSourceFile(.{
+        .file = b.path("test/msvc_support.cpp"),
+        .flags = &.{ "-std=c++17", "-fno-autolink", "-fno-rtti" },
+    });
+
+    generateGlue(b, b.path("tools/emit.zig"), lib, .{
+        .attach_to = mod,
+        .binding_module = bindings,
+        .headers = &.{"inline_fixture.hpp"},
+        .flags = if (is_msvc) &.{ "-fno-autolink", "-fno-rtti" } else &.{},
+        .target = target,
+        .name = b.fmt("{s}-glue", .{name}),
+    });
 
     const tests = b.addTest(.{ .name = name, .root_module = mod });
     return &b.addRunArtifact(tests).step;

@@ -55,6 +55,14 @@ test "explicitly instantiated function template" {
     try std.testing.expectEqual(23, sum(&a, &b));
 }
 
+test "a re-exported binding file is scanned too" {
+    const make = cpp.bind(inl.extra.pair_make);
+    const sum = cpp.bind(inl.extra.Pair.sum);
+    const p = make(4, 5);
+    try std.testing.expectEqual(inl.extra.Pair{ .a = 4, .b = 5 }, p);
+    try std.testing.expectEqual(9, sum(&p));
+}
+
 test "inline class returned by value" {
     const make = cpp.bind(inl.rgb_make);
     const total = cpp.bind(inl.rgb_total);

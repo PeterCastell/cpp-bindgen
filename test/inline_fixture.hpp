@@ -47,6 +47,13 @@ struct Array {
 template <typename T>
 int tpl_sum(const T& a, const T& b) { return (int)(a + b); }
 
+// Bound from inline_extra.zig, which build.zig never names.
+struct Pair {
+    int a, b;
+    int sum() const { return a + b; }
+};
+inline Pair pair_make(int a, int b) { return Pair{a, b}; }
+
 // A class with a constructor, so a copy is still a memcpy but MSVC returns it
 // through a hidden pointer.
 struct Rgb {

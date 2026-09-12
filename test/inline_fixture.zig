@@ -2,10 +2,9 @@
 //! Nothing here links unless the generated glue emitted a definition for it,
 //! so this file is the end-to-end test of `emit.zig`.
 //!
-//! It is also the shape a real binding file takes: types, `Signature`
-//! constants for whatever is header-only, and a `cpp_manifest` naming the
-//! headers and the modules to scan.
-const builtin = @import("builtin");
+//! It is also the shape a real binding file takes: types and `Signature`
+//! constants, and nothing else. The headers and the build wiring live in
+//! `build.zig`.
 const cpp = @import("cpp_bindgen");
 
 const Signature = cpp.Signature;
@@ -74,10 +73,6 @@ pub const rgb_total: Signature = .{ .name = "inl::rgb_total", .args = &.{Rgb}, .
 pub const array_sum: Signature = .{ .name = "sum", .ret = c_int, .this = *const Array3 };
 pub const array_size: Signature = .{ .name = "size", .ret = c_int, .class = Array3 };
 
-pub const cpp_manifest: cpp.emit.Manifest = .{
-    .headers = &.{"inline_fixture.hpp"},
-    .modules = &.{@This()},
-    // This build links no C++ runtime, and `Shape`'s virtual destructor pulls
-    // in the deleting form, which calls `operator delete`.
-    .prelude = if (builtin.target.abi == .msvc) "void operator delete(void*, size_t) noexcept {}" else "",
-};
+// A second binding file. The scan follows a public re-export, so this line
+// is all `build.zig` needs to know about it.
+pub const extra = @import("inline_extra.zig");

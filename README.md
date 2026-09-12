@@ -126,11 +126,44 @@ things no Zig code can do for itself:
   what a binding gets wrong, and a `static_assert` turns a silent memory corruption
   into a compile error.
 
-Put a manifest in your bindings file. It names the headers to include and the modules
-to scan. Scanning runs twice: first over each module's public declarations, keeping
-every type that carries `cpp_name` or `cpp_template` and every `Signature` constant;
-then over the public declarations of each type it found, keeping the `Signature`
-constants there too. So a class's methods can live on the class.
+Your bindings file holds types and signatures and nothing else. The headers and
+the wiring go in `build.zig`:
+
+```zig
+const cpp_bindgen = @import("cpp_bindgen");            // in build.zig
+const dep = b.dependency("cpp_bindgen", .{ .target = target });
+
+const bindings = b.createModule(.{ .root_source_file = b.path("src/bindings.zig"), .target = target });
+bindings.addImport("cpp_bindgen", dep.module("cpp_bindgen"));
+exe_mod.addImport("bindings", bindings);               // your code needs this anyway
+
+cpp_bindgen.addCppGlue(b, dep, .{
+    .attach_to = exe_mod,
+    .binding_module = bindings,
+    .headers = &.{"counter.hpp"},
+    .target = target,
+});
+```
+
+`addCppGlue` compiles the glue into `attach_to`, so it inherits that module's
+include paths. Give it the same defines as the rest of your C++ through `flags`: the
+facts it checks are only the facts that will be linked if it sees the same
+declarations. The generated file goes through the cache and never lands in your
+source tree.
+
+## What the scan finds
+
+Starting from `binding_module`, every public declaration is examined:
+
+- A **type** carrying `cpp_name` or `cpp_template` gets the layout checks, and a
+  `cpp_template` also gets an explicit instantiation.
+- A **`Signature` constant** gets a forced definition.
+- A **namespace** — a struct with no fields that is not itself a C++ class — is
+  walked in turn. That is what a `pub const string = @import("string.zig");` is, so
+  a bindings set split across files needs no extra build wiring.
+
+Then each type found is walked the same way, so a class's methods can be declared on
+the class. The same function reached twice is emitted once.
 
 ```zig
 pub const Counter = extern struct {
@@ -142,38 +175,19 @@ pub const Counter = extern struct {
     pub const get: cpp.Signature = .{ .name = "get", .ret = c_int, .this = *const @This() };
 };
 
-// A free function's signature goes at module scope.
+// A free function's signature goes at file scope.
 pub const add: cpp.Signature = .{ .name = "inl::add", .args = &.{ c_int, c_int }, .ret = c_int };
 
-pub const cpp_manifest: cpp.emit.Manifest = .{
-    .headers = &.{"counter.hpp"},
-    .modules = &.{@This()},
-};
+// A second binding file, reached by being re-exported.
+pub const string = @import("string.zig");
 ```
 
 Bind through the constant, `cpp.bind(Counter.get)`, rather than calling `bindMethod`
 directly: a bound function pointer cannot yield back the signature that produced it,
-so a `bindMethod` call site is invisible to the scan. The same function reached twice
-is emitted once.
+so a `bindMethod` call site is invisible to the scan.
 
-Then wire it into `build.zig`:
-
-```zig
-const cpp_bindgen = @import("cpp_bindgen");
-const dep = b.dependency("cpp_bindgen", .{ .target = target });
-
-const bindings = b.createModule(.{ .root_source_file = b.path("src/bindings.zig"), .target = target });
-bindings.addImport("cpp_bindgen", dep.module("cpp_bindgen"));
-exe_mod.addImport("bindings", bindings);
-
-const glue = cpp_bindgen.addCppGlue(b, dep, .{ .bindings = bindings, .target = target });
-exe_mod.addCSourceFile(.{ .file = glue, .flags = cpp_bindgen.glue_flags });
-```
-
-The generated file goes through the cache; it never lands in your source tree. Compile
-it with `glue_flags`, and with the same headers and defines as the C++ it binds — the
-facts it checks are only the facts that will be linked if it sees the same
-declarations.
+Only *public* declarations are visible, so a private `const std = @import("std")`
+cannot drag the standard library into the walk. A public one would.
 
 Two declarations steer the glue, both on the Zig type:
 
