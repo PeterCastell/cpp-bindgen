@@ -86,14 +86,19 @@ pub const Signature = struct {
 // Both run on caller-provided storage, so the Zig type must have the C++
 // object's size and alignment.
 
-/// The function pointer type of a bound signature, as Zig sees it: an
-/// out-pointer first when a `.managed_copy` class is returned by value,
-/// then `this` (if any), then `args`, with the C calling convention.
-/// Reference markers become the pointers they wrap; `.managed_copy`
-/// arguments become `*T`. See `ClassAbi`.
-pub fn FnType(comptime sig: Signature) type {
+/// The type of a bound signature that needs a wrapper. Past ten parameters
+/// the whole list collapses into one tuple, since that is the only shape a
+/// single declaration can give every arity. A wrapper is a Zig function, so
+/// it takes Zig's calling convention rather than the C one.
+fn TrampolineFnType(comptime sig: Signature) type {
     const r = comptime substituted(sig);
-    return fnTypeOf(visibleParams(r), visibleRet(r));
+    const params = visibleParams(r);
+    return @Fn(if (params.len <= 10) params else &[_]type{@Tuple(params)}, &@splat(.{}), visibleRet(r), .{});
+}
+
+fn IdentityFnType(comptime sig: Signature) type {
+    const r = comptime substituted(sig);
+    return @Fn(visibleParams(r), &@splat(.{}), visibleRet(r), .{ .@"callconv" = .c });
 }
 
 /// The signature with every `TParam` replaced by the template argument it
@@ -137,12 +142,6 @@ fn argType(comptime sig: Signature, comptime T: type) type {
     return a.type;
 }
 
-fn fnTypeOf(comptime params: []const type, comptime Ret: type) type {
-    var attrs: [params.len]std.lang.Type.Fn.ParamAttributes = undefined;
-    for (&attrs) |*a| a.* = .{};
-    return @Fn(params, &attrs, Ret, .{ .@"callconv" = .c });
-}
-
 // Helpers below force comptime evaluation so runtime callers (the trampoline)
 // do not turn their branches into runtime conditions.
 
@@ -180,22 +179,40 @@ fn isClass(comptime T: type) bool {
 
 /// Binds a C++ function or method by its signature, using the target's
 /// mangling.
-pub fn bind(comptime sig: Signature) *const FnType(sig) {
-    return bindAs(default_mangling, sig);
+pub fn bind(comptime sig: Signature) *const FnType(default_mangling, sig) {
+    return bindWithMangling(default_mangling, sig);
+}
+
+/// The function pointer type of a bound signature, as Zig sees it: an
+/// out-pointer first when a `.managed_copy` class is returned by value,
+/// then `this` (if any), then `args`. Reference markers become the pointers
+/// they wrap; `.managed_copy` arguments become `*T`. See `ClassAbi`.
+///
+/// A signature whose call shape already matches the C++ symbol gets that
+/// symbol's own `callconv(.c)` type; one that needs a wrapper gets the
+/// wrapper's. Which of the two applies depends on the mangling.
+pub fn FnType(comptime mangling: Mangling, comptime sig: Signature) type {
+    const r = comptime substituted(sig);
+    const f = comptime describe(sig);
+    const plan = comptime planFor(mangling, r, f);
+    if (comptime plan.isIdentity(r)) {
+        return IdentityFnType(sig);
+    }
+    return TrampolineFnType(sig);
 }
 
 /// Like `bind`, with an explicit mangling. Useful for a `windows-gnu` build
 /// that links a library produced by Visual C++.
-pub fn bindAs(comptime mangling: Mangling, comptime sig: Signature) *const FnType(sig) {
+pub fn bindWithMangling(comptime mangling: Mangling, comptime sig: Signature) *const FnType(mangling, sig) {
     const r = comptime substituted(sig);
     const f = comptime describe(sig);
     const plan = comptime planFor(mangling, r, f);
     const name = comptime mangledName(mangling, sig);
     if (comptime plan.isIdentity(r)) {
-        return @extern(*const FnType(sig), .{ .name = name });
+        return @extern(*const IdentityFnType(sig), .{ .name = name });
     }
-    const ext = @extern(*const fnTypeOf(plan.ext_params, plan.ext_ret), .{ .name = name });
-    return trampoline(mangling, r, plan, ext);
+    const ext = @extern(*const @Fn(plan.ext_params, &@splat(.{}), plan.ext_ret, .{ .@"callconv" = .c }), .{ .name = name });
+    return &trampoline(mangling, r, plan, ext);
 }
 
 /// Where a parameter of the real extern function comes from.
@@ -281,14 +298,15 @@ fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: cty
     };
 }
 
-/// A `callconv(.c)` function with the visible signature that performs the
-/// real call per `plan`. One entry point per arity, since a function body
-/// cannot take a generated parameter list.
-fn trampoline(comptime mangling: Mangling, comptime sig: Signature, comptime plan: Plan, comptime ext: anytype) *const FnType(sig) {
+/// A function with the visible signature that performs the real call per
+/// `plan`. A function body cannot take a generated parameter list, so there
+/// is one entry point per arity and a last one, `fN`, that takes the whole
+/// argument list as a tuple for the arities no named entry point covers.
+fn trampoline(comptime mangling: Mangling, comptime sig: Signature, comptime plan: Plan, comptime extern_func: anytype) TrampolineFnType(sig) {
     const V = comptime visibleParams(sig);
     const R = comptime visibleRet(sig);
     const T = struct {
-        inline fn invoke(args: anytype) R {
+        inline fn invoke(args: @Tuple(V)) R {
             var tmp: (if (plan.ret_from_tmp) R else void) = undefined;
             var ext_args: @Tuple(plan.ext_params) = undefined;
             inline for (plan.sources, 0..) |src, i| {
@@ -298,66 +316,69 @@ fn trampoline(comptime mangling: Mangling, comptime sig: Signature, comptime pla
                     .hidden_int => |c| c,
                 };
             }
-            const r = @call(.auto, ext, ext_args);
+            const r = @call(.auto, extern_func, ext_args);
             inline for (plan.destroy) |v| {
-                const dtor = comptime bindAs(mangling, .{ .name = "~", .this = V[v] });
+                const dtor = comptime bindWithMangling(mangling, .{ .name = "~", .this = V[v] });
                 dtor(args[v]);
             }
             return if (plan.ret_from_tmp) tmp else r;
         }
-        fn f0() callconv(.c) R {
+        fn f0() R {
             return invoke(.{});
         }
-        fn f1(a: V[0]) callconv(.c) R {
+        fn f1(a: V[0]) R {
             return invoke(.{a});
         }
-        fn f2(a: V[0], b: V[1]) callconv(.c) R {
+        fn f2(a: V[0], b: V[1]) R {
             return invoke(.{ a, b });
         }
-        fn f3(a: V[0], b: V[1], c: V[2]) callconv(.c) R {
+        fn f3(a: V[0], b: V[1], c: V[2]) R {
             return invoke(.{ a, b, c });
         }
-        fn f4(a: V[0], b: V[1], c: V[2], d: V[3]) callconv(.c) R {
+        fn f4(a: V[0], b: V[1], c: V[2], d: V[3]) R {
             return invoke(.{ a, b, c, d });
         }
-        fn f5(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4]) callconv(.c) R {
+        fn f5(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4]) R {
             return invoke(.{ a, b, c, d, e });
         }
-        fn f6(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5]) callconv(.c) R {
+        fn f6(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5]) R {
             return invoke(.{ a, b, c, d, e, g });
         }
-        fn f7(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6]) callconv(.c) R {
+        fn f7(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6]) R {
             return invoke(.{ a, b, c, d, e, g, h });
         }
-        fn f8(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7]) callconv(.c) R {
+        fn f8(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7]) R {
             return invoke(.{ a, b, c, d, e, g, h, i });
         }
-        fn f9(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7], j: V[8]) callconv(.c) R {
+        fn f9(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7], j: V[8]) R {
             return invoke(.{ a, b, c, d, e, g, h, i, j });
         }
-        fn f10(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7], j: V[8], k: V[9]) callconv(.c) R {
+        fn f10(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7], j: V[8], k: V[9]) R {
             return invoke(.{ a, b, c, d, e, g, h, i, j, k });
+        }
+        fn fN(args: @Tuple(V)) R {
+            return invoke(args);
         }
     };
     return switch (comptime V.len) {
-        0 => &T.f0,
-        1 => &T.f1,
-        2 => &T.f2,
-        3 => &T.f3,
-        4 => &T.f4,
-        5 => &T.f5,
-        6 => &T.f6,
-        7 => &T.f7,
-        8 => &T.f8,
-        9 => &T.f9,
-        10 => &T.f10,
-        else => @compileError(sig.name ++ ": calls that need a wrapper support at most 10 parameters"),
+        0 => T.f0,
+        1 => T.f1,
+        2 => T.f2,
+        3 => T.f3,
+        4 => T.f4,
+        5 => T.f5,
+        6 => T.f6,
+        7 => T.f7,
+        8 => T.f8,
+        9 => T.f9,
+        10 => T.f10,
+        else => T.fN,
     };
 }
 
 /// Binds a free function: `int ns::add(int, int)` is
 /// `bindFn(&.{ c_int, c_int }, c_int, "ns::add")`.
-pub fn bindFn(comptime Args: []const type, comptime Ret: type, comptime name: []const u8) *const FnType(.{ .name = name, .args = Args, .ret = Ret }) {
+pub fn bindFn(comptime Args: []const type, comptime Ret: type, comptime name: []const u8) *const FnType(default_mangling, .{ .name = name, .args = Args, .ret = Ret }) {
     return bind(.{ .name = name, .args = Args, .ret = Ret });
 }
 
@@ -368,14 +389,14 @@ pub fn bindFn(comptime Args: []const type, comptime Ret: type, comptime name: []
 /// from `Counter`'s `cpp_name`. A qualified name such as `"ns::Base::get"`
 /// overrides the class, which is how a base-class method is called through
 /// a derived pointer.
-pub fn bindMethod(comptime Self: type, comptime Args: []const type, comptime Ret: type, comptime name: []const u8) *const FnType(.{ .name = name, .args = Args, .ret = Ret, .this = Self }) {
+pub fn bindMethod(comptime Self: type, comptime Args: []const type, comptime Ret: type, comptime name: []const u8) *const FnType(default_mangling, .{ .name = name, .args = Args, .ret = Ret, .this = Self }) {
     return bind(.{ .name = name, .args = Args, .ret = Ret, .this = Self });
 }
 
 /// Binds a static member function of `Class`, which takes no `this`:
 /// `static int ns::Counter::instances()` is
 /// `bindStatic(Counter, &.{}, c_int, "instances")`.
-pub fn bindStatic(comptime Class: type, comptime Args: []const type, comptime Ret: type, comptime name: []const u8) *const FnType(.{ .name = name, .args = Args, .ret = Ret, .class = Class }) {
+pub fn bindStatic(comptime Class: type, comptime Args: []const type, comptime Ret: type, comptime name: []const u8) *const FnType(default_mangling, .{ .name = name, .args = Args, .ret = Ret, .class = Class }) {
     return bind(.{ .name = name, .args = Args, .ret = Ret, .class = Class });
 }
 

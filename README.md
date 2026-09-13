@@ -237,7 +237,11 @@ name.
 
 ## Limits
 
-- A call that needs a wrapper takes at most 10 parameters.
+- A call that needs a wrapper takes its arguments as a tuple past ten parameters:
+  `f(.{ a, b, ... })` rather than `f(a, b, ...)`. Ten or fewer is a plain call.
+- A binding that needs a wrapper is a Zig function, so it has Zig's calling
+  convention rather than `callconv(.c)`. Whether a signature needs one depends on
+  the ABI, so write `const f = cpp.bind(...)` and let the type be inferred.
 - A `TParam` is understood as a whole parameter, as the pointee of a reference, or as
   a template argument of another type. Nowhere else.
 - On AArch64, a function that returns a class through a hidden pointer fails to

@@ -252,3 +252,24 @@ namespace ns {
     Str Holder::get() const { return Str(s); }
     size_t Holder::take(Str t) { return s.len * 100 + t.len; }
 }
+
+// One visible parameter per by-value Str, plus the out-pointer and `this`.
+// A method returning a managed class needs a wrapper on both ABIs, so these
+// reach the trampoline and pick its entry point by arity.
+namespace ns {
+    struct Sink {
+        int pick;
+        Str none() const;
+        Str eight(Str a, Str b, Str c, Str d, Str e, Str f, Str g, Str h) const;
+        Str nine(Str a, Str b, Str c, Str d, Str e, Str f, Str g, Str h, Str i) const;
+    };
+    Str Sink::none() const { return Str("none"); }
+    Str Sink::eight(Str a, Str b, Str c, Str d, Str e, Str f, Str g, Str h) const {
+        const Str* v[8] = {&a, &b, &c, &d, &e, &f, &g, &h};
+        return *v[pick % 8];
+    }
+    Str Sink::nine(Str a, Str b, Str c, Str d, Str e, Str f, Str g, Str h, Str i) const {
+        const Str* v[9] = {&a, &b, &c, &d, &e, &f, &g, &h, &i};
+        return *v[pick % 9];
+    }
+}

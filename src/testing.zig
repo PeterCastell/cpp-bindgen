@@ -30,6 +30,11 @@ const Vec2 = extern struct {
     pub const cpp_name = "ns::Vec2";
 };
 
+const Sink = extern struct {
+    pick: c_int,
+    pub const cpp_name = "ns::Sink";
+};
+
 const Ops = extern struct {
     x: c_int,
     pub const cpp_name = "ns::Ops";
@@ -268,19 +273,24 @@ const cases = [_]Case{
     .{ .sig = .{ .name = "take", .args = &.{Str}, .ret = usize, .this = *Holder }, .itanium = "_ZN2ns6Holder4takeENS_3StrE", .msvc = "?take@Holder@ns@@QEAA_KUStr@2@@Z" },
 };
 
+const test_eval_branch_quota = 5000;
+
 test "itanium mangling matches clang" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     inline for (cases) |c| {
         try std.testing.expectEqualStrings(c.itanium, comptime mangledName(.itanium, c.sig));
     }
 }
 
 test "msvc mangling matches clang" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     inline for (cases) |c| {
         try std.testing.expectEqualStrings(c.msvc, comptime mangledName(.msvc, c.sig));
     }
 }
 
 test "named type without cpp_name uses its Zig name; kinds" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     const Foo = opaque {};
     const E = enum(c_int) { a, _ };
     const K = opaque {
@@ -292,6 +302,7 @@ test "named type without cpp_name uses its Zig name; kinds" {
 }
 
 test "msvc back-reference tables cap at ten entries" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     const S = opaque {};
     const P = *S;
     const args = [_]type{ P, P, P, P, P, P, P, P, P, P, P, P };
@@ -299,6 +310,8 @@ test "msvc back-reference tables cap at ten entries" {
 }
 
 test "free functions" {
+    @setEvalBranchQuota(test_eval_branch_quota);
+
     const add = bindFn(&.{ c_int, c_int }, c_int, "add");
     try std.testing.expectEqual(5, add(2, 3));
 
@@ -330,6 +343,7 @@ test "free functions" {
 }
 
 test "namespaced functions" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     const add = bindFn(&.{ c_int, c_int }, c_int, "ns::add");
     try std.testing.expectEqual(23, add(2, 3));
 
@@ -344,6 +358,8 @@ test "namespaced functions" {
 }
 
 test "member functions" {
+    @setEvalBranchQuota(test_eval_branch_quota);
+
     const counter_new = bindFn(&.{ *Counter, c_int }, *Counter, "ns::counter_new");
     const get = bindMethod(*const Counter, &.{}, c_int, "ns::Counter::get");
     const set = bindMethod(*Counter, &.{c_int}, void, "ns::Counter::set");
@@ -362,6 +378,7 @@ test "member functions" {
 }
 
 test "reference parameters and returns" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     const ref_inc = bindFn(&.{Ref(*c_int)}, Ref(*c_int), "ref_inc");
     var x: c_int = 41;
     try std.testing.expectEqual(&x, ref_inc(&x));
@@ -405,6 +422,8 @@ test "reference parameters and returns" {
 }
 
 test "class-template specializations" {
+    @setEvalBranchQuota(test_eval_branch_quota);
+
     const pair_sum = bindFn(&.{Ref(*const PairInt)}, c_int, "pair_sum");
     try std.testing.expectEqual(3, pair_sum(&.{ .a = 1, .b = 2 }));
 
@@ -446,6 +465,7 @@ test "class-template specializations" {
 }
 
 test "constructors and destructors" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     const dtor_calls = bindFn(&.{}, c_int, "ns::dtor_calls");
     const before = dtor_calls();
 
@@ -493,12 +513,36 @@ test "constructors and destructors" {
 }
 
 test "visible signatures of by-value classes" {
-    try std.testing.expectEqual(*const fn (c_int, c_int) callconv(.c) Color, *const cpp.FnType(.{ .name = "ns::color_make", .args = &.{ c_int, c_int }, .ret = Color }));
-    try std.testing.expectEqual(*const fn (*Str, *const Holder) callconv(.c) void, *const cpp.FnType(.{ .name = "get", .ret = Str, .this = *const Holder }));
-    try std.testing.expectEqual(*const fn (*Holder, *Str) callconv(.c) usize, *const cpp.FnType(.{ .name = "take", .args = &.{Str}, .ret = usize, .this = *Holder }));
+    @setEvalBranchQuota(test_eval_branch_quota);
+    // A binding whose plan is the identity is the C++ symbol itself, so it
+    // keeps the C calling convention. One that needs a wrapper is a Zig
+    // function, and Zig picks its own convention. Which of the two a
+    // signature gets depends on the ABI, so each of these differs.
+    const msvc = cpp.default_mangling == .msvc;
+
+    // A `.trivial_copy` return goes through a hidden pointer on MSVC only.
+    try std.testing.expectEqual(
+        if (msvc) *const fn (c_int, c_int) Color else *const fn (c_int, c_int) callconv(.c) Color,
+        *const cpp.FnType(cpp.default_mangling, .{ .name = "ns::color_make", .args = &.{ c_int, c_int }, .ret = Color }),
+    );
+
+    // A managed return is an out-pointer on both, but MSVC puts it after
+    // `this`, which the visible signature does not.
+    try std.testing.expectEqual(
+        if (msvc) *const fn (*Str, *const Holder) void else *const fn (*Str, *const Holder) callconv(.c) void,
+        *const cpp.FnType(cpp.default_mangling, .{ .name = "get", .ret = Str, .this = *const Holder }),
+    );
+
+    // A managed argument is destroyed by the caller on Itanium, which is work
+    // only a wrapper can do; MSVC leaves it to the callee.
+    try std.testing.expectEqual(
+        if (msvc) *const fn (*Holder, *Str) callconv(.c) usize else *const fn (*Holder, *Str) usize,
+        *const cpp.FnType(cpp.default_mangling, .{ .name = "take", .args = &.{Str}, .ret = usize, .this = *Holder }),
+    );
 }
 
 test "c_struct by value" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     const vec_make = bindFn(&.{ c_int, c_int }, Vec2, "ns::vec_make");
     const vec_dot = bindFn(&.{ Vec2, Vec2 }, c_int, "ns::vec_dot");
     const v = vec_make(3, 4);
@@ -513,6 +557,7 @@ test "c_struct by value" {
 }
 
 test "trivial_copy by value" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     const color_make = bindFn(&.{ c_int, c_int, c_int, c_int }, Color, "ns::color_make");
     const color_sum = bindFn(&.{Color}, c_int, "ns::color_sum");
     const c = color_make(1, 2, 3, 4);
@@ -535,6 +580,7 @@ test "trivial_copy by value" {
 }
 
 test "managed_copy by value" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     const live = bindFn(&.{}, c_int, "ns::live_strs");
     const base = live();
 
@@ -559,6 +605,7 @@ test "managed_copy by value" {
     const holder_ctor = bindMethod(*Holder, &.{[*:0]const u8}, void, "*");
     const holder_dtor = bindMethod(*Holder, &.{}, void, "~");
     const get = bindMethod(*const Holder, &.{}, Str, "get");
+    @setEvalBranchQuota(test_eval_branch_quota);
     const take = bindMethod(*Holder, &.{Str}, usize, "take");
     var h: Holder = undefined;
     holder_ctor(&h, "four");
@@ -573,6 +620,7 @@ test "managed_copy by value" {
 }
 
 test "function template specializations" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     const int_arg: []const cpp.TemplateArg = &.{.{ .type = c_int }};
 
     const id_int = cpp.bind(.{ .name = "ns::tpl_id", .template_args = int_arg, .args = &.{Ref(*const TParam(0))}, .ret = c_int });
@@ -597,6 +645,7 @@ test "function template specializations" {
 }
 
 test "a class returned from a method" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     const as_vec = cpp.bind(.{ .name = "asVec", .this = *const Counter, .ret = Vec2 });
     const origin = cpp.bind(.{ .name = "origin", .class = Counter, .ret = Vec2 });
     const c = Counter{ .n = 6 };
@@ -605,6 +654,7 @@ test "a class returned from a method" {
 }
 
 test "operator overloads" {
+    @setEvalBranchQuota(test_eval_branch_quota);
     const add = cpp.bind(.{ .name = ":+", .this = *const Ops, .args = &.{Ref(*const Ops)}, .ret = Ops });
     const neg = cpp.bind(.{ .name = ":-", .this = *const Ops, .ret = Ops });
     const not = cpp.bind(.{ .name = ":~", .this = *const Ops, .ret = Ops });
@@ -635,4 +685,66 @@ test "operator overloads" {
     try std.testing.expectEqual(9, a.x);
     try std.testing.expectEqual(&a, add_assign(&a, &b));
     try std.testing.expectEqual(13, a.x);
+}
+
+test "trampoline entry points by arity" {
+    @setEvalBranchQuota(test_eval_branch_quota);
+    const live = bindFn(&.{}, c_int, "ns::live_strs");
+    const base = live();
+    const str_make = bindFn(&.{[*:0]const u8}, Str, "ns::str_make");
+    const str_dtor = bindMethod(*Str, &.{}, void, "~");
+
+    // Nine arguments, each a different length, so the one that comes back
+    // says which position it was forwarded from.
+    const words = [_][*:0]const u8{ "a", "bb", "ccc", "dddd", "eeeee", "ffffff", "ggggggg", "hhhhhhhh", "iiiiiiiii" };
+    var a: [9]Str = undefined;
+    inline for (&a, words) |*slot, w| str_make(slot, w);
+    try std.testing.expectEqual(base + 9, live());
+
+    var out: Str = undefined;
+
+    // Two visible parameters, the out-pointer and `this`: `f2`.
+    const none = bindMethod(*const Sink, &.{}, Str, "none");
+    var s: Sink = .{ .pick = 0 };
+    none(&out, &s);
+    try std.testing.expectEqual(4, out.len);
+    str_dtor(&out);
+
+    // Ten visible parameters, the most the named entry points cover: `f10`.
+    const eight = bindMethod(*const Sink, &.{ Str, Str, Str, Str, Str, Str, Str, Str }, Str, "eight");
+    s.pick = 5;
+    eight(&out, &s, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7]);
+    try std.testing.expectEqual(6, out.len);
+    str_dtor(&out);
+    // The eight arguments were consumed, whichever side destroys them.
+    try std.testing.expectEqual(base + 1, live());
+
+    // `a[8]` was not passed, so it is still alive; only the eight that were
+    // consumed need making again.
+    inline for (a[0..8], words[0..8]) |*slot, w| str_make(slot, w);
+    try std.testing.expectEqual(base + 9, live());
+
+    // Eleven takes the tuple entry point, so the call site passes one tuple.
+    const nine = bindMethod(*const Sink, &.{ Str, Str, Str, Str, Str, Str, Str, Str, Str }, Str, "nine");
+    s.pick = 8;
+    nine(.{ &out, &s, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7], &a[8] });
+    try std.testing.expectEqual(9, out.len);
+    str_dtor(&out);
+
+    try std.testing.expectEqual(base, live());
+}
+
+test "a wrapper past ten parameters takes its arguments as a tuple" {
+    @setEvalBranchQuota(test_eval_branch_quota);
+    const ten: []const type = &.{ Str, Str, Str, Str, Str, Str, Str, Str };
+    const eleven: []const type = &.{ Str, Str, Str, Str, Str, Str, Str, Str, Str };
+    // Ten visible parameters stay a plain parameter list; eleven collapse.
+    try std.testing.expectEqual(
+        *const fn (*Str, *const Sink, *Str, *Str, *Str, *Str, *Str, *Str, *Str, *Str) void,
+        *const cpp.FnType(cpp.default_mangling, .{ .name = "eight", .this = *const Sink, .args = ten, .ret = Str }),
+    );
+    const Eleven = cpp.FnType(cpp.default_mangling, .{ .name = "nine", .this = *const Sink, .args = eleven, .ret = Str });
+    const params = @typeInfo(Eleven).@"fn".param_types;
+    try std.testing.expectEqual(1, params.len);
+    try std.testing.expectEqual(11, @typeInfo(params[0].?).@"struct".field_names.len);
 }
