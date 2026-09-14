@@ -12,8 +12,11 @@
 //!    corruption into a compile error.
 //!
 //! `render` builds the whole file as a comptime string. A generator binary
-//! (`tools/emit.zig`) writes it out, and `addCppGlue` in `build.zig` compiles
-//! it into the same build as the bindings.
+//! (`tools/emit.zig`) writes it out, and `build.zig` either compiles it into
+//! the same build as the bindings (`addCppGlue`) or hands back its path
+//! (`generateCppGlue`). The file needs no particular compiler flags of its
+//! own: what would otherwise be optimized away carries `CPPBINDGEN_KEEP`,
+//! and the one warning it provokes is suppressed in the file.
 const std = @import("std");
 const cpp = @import("root.zig");
 const ctype = @import("ctype.zig");
@@ -50,6 +53,31 @@ pub const Manifest = struct {
 // A public `Signature` declared on the type is a method of that class, and is
 // picked up exactly as one declared at module scope would be.
 
+/// What every stub carries. A constructor, a destructor, and a virtual
+/// function have no address to take, so a stub names one by calling it, and
+/// it is that call that has to survive: inline it and the out-of-line copy
+/// the linker needs is dead, and is dropped. `optnone` says so for the one
+/// function, which `-fno-inline` -- a flag over the whole file -- cannot: the
+/// definitions this file exists to emit stay optimized, so the copy it
+/// contributes to the link is no worse than any other translation unit's.
+const keep = "CPPBINDGEN_KEEP ";
+
+/// Defines `keep`, or fails the compile where nothing can.
+const keep_macro =
+    \\
+    \\// A constructor, a destructor, and a virtual function are named below by
+    \\// calling them, and those calls have to survive the optimizer.
+    \\#if defined(__clang__)
+    \\#  define CPPBINDGEN_KEEP [[clang::optnone]]
+    \\#elif defined(__NO_INLINE__)
+    \\#  define CPPBINDGEN_KEEP
+    \\#else
+    \\#  error "cpp-bindgen: this file must be compiled with -fno-inline when not using clang."
+    \\#  define CPPBINDGEN_KEEP
+    \\#endif
+    \\
+;
+
 /// The whole glue translation unit.
 pub fn render(comptime m: Manifest) []const u8 {
     @setEvalBranchQuota(1 << 30);
@@ -68,6 +96,7 @@ pub fn render(comptime m: Manifest) []const u8 {
     inline for (m.headers) |h| out = out ++ "#include " ++ include(h) ++ "\n";
     // offsetof needs a declaration, and no C++ header is guaranteed here.
     out = out ++ "#include <stddef.h>\n";
+    out = out ++ keep_macro;
 
     // Aliases first: they name each class once, so the checks and the stubs
     // below stay readable however long a template-id is.
@@ -233,8 +262,9 @@ fn instantiations(comptime types: []const Entry) []const u8 {
 /// from a variable with external linkage is the only form that survives
 /// optimization: a call can be inlined, after which the out-of-line copy of
 /// an inline function is dead and is dropped. Constructors, destructors, and
-/// virtual functions have no usable address, so they get a stub instead, and
-/// the glue must be compiled with `-fno-inline` for those to survive.
+/// virtual functions have no usable address, so they get a stub that calls
+/// them instead, and the call is the thing that has to survive: every such
+/// stub carries `keep`.
 fn definitions(comptime fns: []const ctype.Function, comptime types: []const Entry) []const u8 {
     comptime var out: []const u8 = "";
     inline for (fns, 0..) |f, i| {
@@ -294,7 +324,7 @@ fn virtualStub(comptime f: ctype.Function, comptime types: []const Entry, compti
     const self = cls ++ (if (f.this.?.is_const) " const" else "") ++ "* self";
     const args = cppsrc.argList(f.params);
     const sep = if (f.params.len == 0) "" else ", ";
-    return "void " ++ name ++ "(" ++ self ++ sep ++ innerParams(f.params) ++ ") { (void)(self->" ++
+    return keep ++ "void " ++ name ++ "(" ++ self ++ sep ++ innerParams(f.params) ++ ") { (void)(self->" ++
         cls ++ "::" ++ f.path[f.path.len - 1].name ++ "(" ++ args ++ ")); }";
 }
 
@@ -302,7 +332,7 @@ fn virtualStub(comptime f: ctype.Function, comptime types: []const Entry, compti
 fn ctorStub(comptime f: ctype.Function, comptime types: []const Entry, comptime name: []const u8) []const u8 {
     const cls = aliasOf(f.path[0 .. f.path.len - 1], types, f);
     const init = if (f.params.len == 0) "" else "(" ++ cppsrc.argList(f.params) ++ ")";
-    return "void " ++ name ++ "(" ++ innerParams(f.params) ++ ") { " ++ cls ++ " tmp" ++ init ++ "; (void)tmp; }";
+    return keep ++ "void " ++ name ++ "(" ++ innerParams(f.params) ++ ") { " ++ cls ++ " tmp" ++ init ++ "; (void)tmp; }";
 }
 
 /// A destructor named through a typedef, which is how a template-id or a
@@ -311,7 +341,7 @@ fn ctorStub(comptime f: ctype.Function, comptime types: []const Entry, comptime 
 /// vtable dispatch, which names no definition and so forces nothing.
 fn dtorStub(comptime f: ctype.Function, comptime types: []const Entry, comptime name: []const u8) []const u8 {
     const cls = aliasOf(f.path[0 .. f.path.len - 1], types, f);
-    return "void " ++ name ++ "(" ++ cls ++ "* self) { self->" ++ cls ++ "::~" ++ cls ++ "(); }";
+    return keep ++ "void " ++ name ++ "(" ++ cls ++ "* self) { self->" ++ cls ++ "::~" ++ cls ++ "(); }";
 }
 
 fn innerParams(comptime params: []const CType) []const u8 {
@@ -343,7 +373,14 @@ fn checks(comptime types: []const Entry) []const u8 {
         }
     }
     if (out.len == 0) return "";
-    return "\n// What the bindings claim about each class, checked against it.\n" ++ out;
+    // `offsetof` on a class that is not standard layout is conditionally
+    // supported rather than ill-formed, and a binding for a class with a base
+    // or a vtable needs it. Suppressing the warning here rather than through
+    // a flag is what lets this file be compiled any way at all.
+    return "\n// What the bindings claim about each class, checked against it.\n" ++
+        "#if defined(__clang__) || defined(__GNUC__)\n" ++
+        "#  pragma GCC diagnostic ignored \"-Winvalid-offsetof\"\n" ++
+        "#endif\n" ++ out;
 }
 
 /// `ClassAbi` in the C++ compiler's own terms. The category decides how a
@@ -423,8 +460,8 @@ test "render instantiates a specialization and forces a constructor" {
     const out = comptime render(.{ .headers = &.{"<cell>"}, .modules = &.{mod} });
     try expectContains(out, "#include <cell>");
     try expectContains(out, "template struct tpl::Cell<int>;");
-    try expectContains(out, "void cppbindgen_f0(int a0) { cppbindgen_t0 tmp(a0); (void)tmp; }");
-    try expectContains(out, "void cppbindgen_f1(cppbindgen_t0* self) { self->cppbindgen_t0::~cppbindgen_t0(); }");
+    try expectContains(out, "CPPBINDGEN_KEEP void cppbindgen_f0(int a0) { cppbindgen_t0 tmp(a0); (void)tmp; }");
+    try expectContains(out, "CPPBINDGEN_KEEP void cppbindgen_f1(cppbindgen_t0* self) { self->cppbindgen_t0::~cppbindgen_t0(); }");
     try expectContains(out, "static_assert(!(__is_trivially_constructible(cppbindgen_t0, cppbindgen_t0 const&)");
 }
 
@@ -519,7 +556,7 @@ test "render skips padding fields and honours opt-outs" {
     try std.testing.expect(std.mem.indexOf(u8, out, "_vptr") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "template struct tpl::vec") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "offsetof(cppbindgen_t1") == null);
-    try expectContains(out, "void cppbindgen_f0(cppbindgen_t0* self) { (void)(self->cppbindgen_t0::f()); }");
+    try expectContains(out, "CPPBINDGEN_KEEP void cppbindgen_f0(cppbindgen_t0* self) { (void)(self->cppbindgen_t0::f()); }");
 }
 
 fn expectContains(comptime haystack: []const u8, comptime needle: []const u8) !void {

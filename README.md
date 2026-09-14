@@ -180,10 +180,41 @@ cpp_bindgen.addCppGlue(b, dep, .{
 ```
 
 `addCppGlue` compiles the glue into `attach_to`, so it inherits that module's
-include paths. Give it the same defines as the rest of your C++ through `flags`: the
-facts it checks are only the facts that will be linked if it sees the same
-declarations. The generated file goes through the cache and never lands in your
+include paths. The generated file goes through the cache and never lands in your
 source tree.
+
+Everything the glue needs to be *correct* it carries in its own source, so the only
+thing left to get right is matching the rest of your C++. That is what `std` and
+`flags` are for:
+
+- `std` is the C++ language version, `"c++17"` by default. It has to be the one the
+  rest of your C++ is built with. A header that gates a member, an operator, or a
+  layout on `__cplusplus` describes a *different class* at a different version, and
+  then the facts the glue checks and the definitions it emits are not the ones that
+  will be linked. Pass `null` to name no `-std` at all.
+- `flags` is everything else, appended after `std`, so a later flag wins if you would
+  rather spell the version there. Give it the same defines as the rest of your C++:
+  the facts it checks are only the facts that will be linked if it sees the same
+  declarations.
+
+To place the glue yourself instead, `generateCppGlue` takes the same options minus
+`attach_to`, `std`, and `flags`, and returns the path:
+
+```zig
+const glue = cpp_bindgen.generateCppGlue(b, dep, .{
+    .binding_module = bindings,
+    .headers = &.{"counter.hpp"},
+    .target = target,
+});
+lib_mod.addCSourceFile(.{ .file = glue, .flags = &.{ "-std=c++17", "-DNDEBUG" } });
+```
+
+That is the way to compile the glue into a library of its own, into more than one
+module, or to install it with `addInstallFile` and read what your bindings actually
+asked the C++ compiler. The file needs no particular flags to be correct: the stubs
+that would otherwise be optimized away carry `[[clang::optnone]]`, and the one
+warning it provokes is suppressed in the file. On a compiler with no
+`[[clang::optnone]]`, it says so with an `#error` rather than failing at link time.
 
 ## What the scan finds
 
