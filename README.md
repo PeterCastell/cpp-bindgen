@@ -138,6 +138,12 @@ order its declaration gives it, and Zig reorders the fields of a plain struct.
   also selects the complete-object constructor and destructor, since a class without
   virtual bases binds the base-object ones.
 
+- `cpp_bases` — the direct base classes, as Zig types, in C++ source order. See
+  [Base classes](#base-classes).
+- `cpp_polymorphic` — the class has virtual functions. `cpp_virtual_dtor` implies
+  it; declare it only for a class whose destructor is not virtual but something
+  else is.
+
 The default `cpp_abi` is `.c_struct`. That value is correct for plain data, and wrong
 for a class with a constructor, a destructor, or a virtual function. Declare the
 value for every such class.
@@ -145,6 +151,61 @@ value for every such class.
 Bind a constructor as a method named `"*"`, and a destructor as `"~"`. Both run on
 storage that you supply. The Zig type must have the size and the alignment of the C++
 object, because the library reads no headers. `addCppGlue` checks that for you.
+
+### Base classes
+
+A derived class names its bases and spells the space they take as its first field.
+Everything else is computed: where each base sits on the target's ABI, whether the
+class's own vtable pointer comes first, and how far `this` moves to reach a base's
+method.
+
+```zig
+pub const Node = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),   // its vtable pointer
+    x: c_int,
+    pub const cpp_name = "ofNode";
+    pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+    pub const cpp_virtual_dtor = true;
+};
+
+pub const Camera = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),   // Node, wherever it goes
+    lens: f64,                                                      // Camera's own members follow
+    pub const cpp_name = "ofCamera";
+    pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+    pub const cpp_bases: []const type = &.{Node};
+
+    pub fn node(self: *Camera) *Node {
+        return cpp.basePtr(Node, self);
+    }
+};
+
+// A base method through a derived pointer: `.class` names the base.
+const set_x = cpp.bind(.{ .name = "setX", .class = Node, .args = &.{c_int}, .this = *Camera });
+```
+
+`_bases` must be the first field and must be spelled exactly so: a bare array with
+the alignment on the field. Wrapping it in a struct would round its length up to its
+alignment, and Itanium lays a derived class's members into the tail padding of a
+non-POD base, which needs the unpadded length. The class's own members follow, named
+or opaque, exactly as in a class without bases.
+
+`cpp.basePtr(Base, ptr)` is the upcast, and a compile error when `Base` is not a base
+of the pointee. `cpp.baseOffset(Derived, Base)` is the offset it adds, or null. A
+`Signature` whose `.class` is a base of what `this` points at is checked the same way
+and has `this` moved before the call, which matters when the base is not at offset 0:
+the second of two polymorphic bases, say. A *qualified* name (`"ofNode::setX"`) names
+no Zig class and is passed through unchecked, as before.
+
+The rules, measured against clang on both ABIs: a base goes at the next offset
+aligned for it; the next offset is where the previous base *ends*, which on MSVC is
+its whole `sizeof` and on Itanium only its data unless it is POD; the first polymorphic
+base is primary and goes first whatever the declaration order; a class with virtual
+functions and no polymorphic base gets its own vtable pointer ahead of every base.
+Virtual bases have no fixed offset and are refused. The glue asserts that each base is
+a base of the class and that each is polymorphic exactly when the binding says, and
+the derived class's own member offsets — which sit where the bases end — are checked
+as they always were.
 
 ## Glue
 
@@ -156,9 +217,10 @@ things no Zig code can do for itself:
   has a symbol until some translation unit emits one, and a header alone never does.
   The glue is that translation unit.
 - **It checks every layout fact your bindings assert**, in the C++ compiler, against
-  the real class: size, alignment, member offsets, and `cpp_abi` category. Those are
-  what a binding gets wrong, and a `static_assert` turns a silent memory corruption
-  into a compile error.
+  the real class: size, alignment, member offsets, `cpp_abi` category, and for a
+  class with bases, that each base is one and that it and each base are polymorphic
+  exactly as declared. Those are what a binding gets wrong, and a `static_assert`
+  turns a silent memory corruption into a compile error.
 
 Your bindings file holds types and signatures and nothing else. The headers and
 the wiring go in `build.zig`:
@@ -277,6 +339,8 @@ name.
   a template argument of another type. Nowhere else.
 - On AArch64, a function that returns a class through a hidden pointer fails to
   compile.
+- A class with a virtual base cannot declare `cpp_bases`: the base has no fixed
+  offset. Spell its layout by hand, and reach the base through a C++ thunk.
 - The library reads no headers. You write each signature, and you keep it correct
   when the C++ changes. The glue checks the types; it cannot check a signature.
 - The glue generator runs on the build machine, so it needs a target the build
@@ -292,9 +356,12 @@ zig build test
 The tests compile `test/fixture.cpp` into the test binary, so a wrong mangled name
 fails at link time. They also compare every name to a golden name from clang. A second
 test binary binds `test/inline_fixture.hpp`, which defines everything inline and so has
-no symbols of its own: it links only because the generated glue emitted them. On a
-Windows x86_64 host with MSVC and the Windows SDK, `zig build test-msvc` repeats both
-with the MSVC ABI.
+no symbols of its own: it links only because the generated glue emitted them. Both
+bind base-class methods through derived pointers, including one whose base is not at
+offset 0, and `src/inherit.zig` checks the computed base placement against numbers
+read from clang's `-fdump-record-layouts` for the same C++. On a Windows x86_64 host
+with MSVC and the Windows SDK, `zig build test-msvc` repeats all of it with the MSVC
+ABI, where those numbers differ.
 
 The library needs Zig 0.17.0-dev.1683+5ceec001b or later.
 

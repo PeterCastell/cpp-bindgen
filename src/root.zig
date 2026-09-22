@@ -5,12 +5,18 @@
 //! what C++ uses for everything except classes passed by value. Those follow
 //! ABI-specific rules; the class declares its category (`ClassAbi`) and the
 //! binder inserts a wrapper where the call shape differs from C.
+//!
+//! A class with bases declares them (`cpp_bases`), and where each base sits
+//! is computed for the target's ABI (`inherit.zig`). A base's method bound
+//! through a derived pointer is checked against that and has `this` moved to
+//! the base subobject.
 const std = @import("std");
 const builtin = @import("builtin");
 
 pub const ctype = @import("ctype.zig");
 const cppsrc = @import("cppsrc.zig");
 pub const emit = @import("emit.zig");
+const inherit = @import("inherit.zig");
 const itanium = @import("itanium.zig");
 const msvc = @import("msvc.zig");
 
@@ -27,6 +33,10 @@ pub const Op = ctype.Op;
 pub const Template = ctype.Template;
 pub const TemplateArg = ctype.TemplateArg;
 pub const ClassAbi = ctype.ClassAbi;
+pub const BaseSpan = inherit.BaseSpan;
+pub const baseAlign = inherit.baseAlign;
+pub const basePtr = inherit.basePtr;
+pub const baseOffset = inherit.baseOffset;
 
 pub const Mangling = enum { itanium, msvc };
 
@@ -44,7 +54,10 @@ pub const Signature = struct {
     name: []const u8,
     /// The class a bare `name` belongs to. With `this` unset, the function
     /// is a static member function, which MSVC mangles differently from a
-    /// free function in the same scope.
+    /// free function in the same scope. With `this` pointing at a class
+    /// derived from it (see `cpp_bases`), it is the base's method called
+    /// through the derived pointer, and `this` is moved to the base
+    /// subobject before the call.
     class: ?type = null,
     /// Parameter types, excluding `this`. A C++ reference parameter is
     /// written as `Ref(*T)` / `Ref(*const T)` / `RRef(*T)`, and a `T* const`
@@ -80,6 +93,13 @@ pub const Signature = struct {
 // - `cpp_virtual_bases: bool`: the class has virtual bases. Selects MSVC's
 //   `??_D` complete destructor and makes constructors pass the hidden
 //   "most derived" flag.
+// - `cpp_bases: []const type`: the direct bases, in C++ source order. The
+//   type then starts with `_bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This()))`,
+//   which is every base laid out where the ABI puts it (see `inherit.zig`).
+// - `cpp_polymorphic: bool`: the class has virtual functions. Implied by
+//   `cpp_virtual_dtor`; needed only for a class whose destructor is not
+//   virtual but something else is, since it decides whether a vtable
+//   pointer precedes the bases.
 //
 // A constructor is bound as a method named `"*"` (or `"ns::Class::*"`) with
 // a `*T` self and `void` return; a destructor as `"~"`, with no arguments.
@@ -218,6 +238,8 @@ pub fn bindWithMangling(comptime mangling: Mangling, comptime sig: Signature) *c
 /// Where a parameter of the real extern function comes from.
 const Source = union(enum) {
     visible: usize,
+    /// A visible pointer plus a constant: `this` moved to a base subobject.
+    adjusted: struct { visible: usize, offset: usize },
     /// Address of a local the callee returns into (MSVC trivial_copy returns).
     tmp_ret,
     /// MSVC "most derived" flag for constructors with virtual bases.
@@ -268,8 +290,14 @@ fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: cty
         sources = sources ++ &[_]Source{ret_src};
     }
     if (sig.this) |T| {
-        ext_params = ext_params ++ &[_]type{T};
-        sources = sources ++ &[_]Source{.{ .visible = this_idx }};
+        const adjust = thisAdjust(sig);
+        if (adjust == 0) {
+            ext_params = ext_params ++ &[_]type{T};
+            sources = sources ++ &[_]Source{.{ .visible = this_idx }};
+        } else {
+            ext_params = ext_params ++ &[_]type{PointerTo(sig.class.?, T)};
+            sources = sources ++ &[_]Source{.{ .adjusted = .{ .visible = this_idx, .offset = adjust } }};
+        }
     }
     if (hidden_ret and mangling == .msvc) {
         ext_params = ext_params ++ &[_]type{RetPtr};
@@ -312,6 +340,7 @@ fn trampoline(comptime mangling: Mangling, comptime sig: Signature, comptime pla
             inline for (plan.sources, 0..) |src, i| {
                 ext_args[i] = switch (src) {
                     .visible => |v| args[v],
+                    .adjusted => |a| @ptrFromInt(@intFromPtr(args[a.visible]) + a.offset),
                     .tmp_ret => &tmp,
                     .hidden_int => |c| c,
                 };
@@ -386,9 +415,11 @@ pub fn bindFn(comptime Args: []const type, comptime Ret: type, comptime name: []
 /// and `*const T` for a const one, and becomes the first parameter:
 /// `int ns::Counter::get() const` is
 /// `bindMethod(*const Counter, &.{}, c_int, "get")`, with the class taken
-/// from `Counter`'s `cpp_name`. A qualified name such as `"ns::Base::get"`
-/// overrides the class, which is how a base-class method is called through
-/// a derived pointer.
+/// from `Counter`'s `cpp_name`. To call a base's method through a derived
+/// pointer, use `bind` with `.class = Base` and the derived `this`: the
+/// relation is checked against `cpp_bases` and `this` is moved to the base
+/// subobject. A qualified name such as `"ns::Base::get"` also overrides the
+/// class, but names no Zig type, so it is neither checked nor adjusted.
 pub fn bindMethod(comptime Self: type, comptime Args: []const type, comptime Ret: type, comptime name: []const u8) *const FnType(default_mangling, .{ .name = name, .args = Args, .ret = Ret, .this = Self }) {
     return bind(.{ .name = name, .args = Args, .ret = Ret, .this = Self });
 }
@@ -488,6 +519,25 @@ fn pathOf(comptime sig: Signature) []const ctype.Component {
     return class.named.path ++ &[_]ctype.Component{.{ .name = sig.name }};
 }
 
+/// How far `this` moves to reach the class a bare `name` belongs to, when
+/// `this` points at a class derived from it: zero for the class itself or a
+/// primary base, and a compile error for a class that is not a base at all.
+/// A qualified name gives no class to check against and is passed through
+/// as written.
+fn thisAdjust(comptime sig: Signature) comptime_int {
+    const Class = sig.class orelse return 0;
+    const Self = sig.this orelse return 0;
+    const Derived = thisPointee(sig.name, Self);
+    if (Derived == Class) return 0;
+    return inherit.baseOffset(Derived, Class) orelse
+        @compileError(sig.name ++ ": " ++ @typeName(Class) ++ " is not a base of " ++ @typeName(Derived) ++ ", the class `this` points at; list it in cpp_bases");
+}
+
+/// `*Class` with the constness of `Self`.
+fn PointerTo(comptime Class: type, comptime Self: type) type {
+    return if (@typeInfo(Self).pointer.attrs.@"const") *const Class else *Class;
+}
+
 fn thisPointee(comptime name: []const u8, comptime Self: type) type {
     const info = @typeInfo(Self);
     if (info != .pointer or info.pointer.size != .one) @compileError(name ++ ": `this` must be a single-item pointer, got " ++ @typeName(Self));
@@ -504,6 +554,7 @@ test {
     _ = ctype;
     _ = emit;
     _ = @import("cppsrc.zig");
+    _ = inherit;
     _ = itanium;
     _ = msvc;
     _ = @import("testing.zig");

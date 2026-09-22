@@ -63,6 +63,21 @@ test "a re-exported binding file is scanned too" {
     try std.testing.expectEqual(9, sum(&p));
 }
 
+test "base classes through the glue" {
+    var d: inl.Derived = undefined;
+    cpp.bind(inl.Derived.ctor)(&d, 3, 4);
+    try std.testing.expectEqual(43, cpp.bind(inl.Derived.get)(&d));
+    try std.testing.expectEqual(3, cpp.bind(inl.Derived.base_get)(&d));
+    try std.testing.expectEqual(3, cpp.basePtr(inl.Base, &d).b);
+
+    var m: inl.Multi = undefined;
+    cpp.bind(inl.Multi.ctor)(&m, 1, 2, 3);
+    try std.testing.expectEqual(1, cpp.bind(inl.Multi.base_get)(&m));
+    try std.testing.expectEqual(2, cpp.bind(inl.Multi.side_get)(&m));
+    try std.testing.expectEqual(2, cpp.basePtr(inl.Side, &m).s);
+    try std.testing.expectEqual(3, m.m);
+}
+
 test "inline class returned by value" {
     const make = cpp.bind(inl.rgb_make);
     const total = cpp.bind(inl.rgb_total);

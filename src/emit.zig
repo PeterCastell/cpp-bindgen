@@ -7,7 +7,8 @@
 //!    never does. The glue is that translation unit.
 //! 2. Checks, in the C++ compiler, that every Zig type standing for a C++
 //!    class has the size, alignment, member offsets, and ABI category that
-//!    the class really has. `cpp-bindgen` reads no headers, so these are the
+//!    the class really has, and that its declared bases are bases and its
+//!    polymorphism is as declared. `cpp-bindgen` reads no headers, so these are the
 //!    facts a binding gets wrong; a `static_assert` turns a silent memory
 //!    corruption into a compile error.
 //!
@@ -21,6 +22,7 @@ const std = @import("std");
 const cpp = @import("root.zig");
 const ctype = @import("ctype.zig");
 const cppsrc = @import("cppsrc.zig");
+const inherit = @import("inherit.zig");
 
 const CType = ctype.CType;
 const Signature = cpp.Signature;
@@ -49,6 +51,12 @@ pub const Manifest = struct {
 // A field whose name starts with `_` is not checked: that is how a binding
 // spells a vtable pointer, a virtual base, or tail padding, none of which is
 // a C++ member that `offsetof` can name.
+//
+// A type with `cpp_bases`, `cpp_polymorphic`, or `cpp_virtual_dtor` is also
+// checked for those: each base is a base of it, and it and each base are
+// polymorphic exactly when the binding says. Where the bases end is what the
+// derived class's own members are placed after, so their `offsetof` checks
+// cover that too.
 //
 // A public `Signature` declared on the type is a method of that class, and is
 // picked up exactly as one declared at module scope would be.
@@ -369,6 +377,7 @@ fn checks(comptime types: []const Entry) []const u8 {
             out = out ++ assert("sizeof(" ++ a ++ ") == " ++ ctype.decimal(@sizeOf(e.T)), cxx ++ " is not " ++ ctype.decimal(@sizeOf(e.T)) ++ " bytes, the size of " ++ @typeName(e.T));
             out = out ++ assert("alignof(" ++ a ++ ") == " ++ ctype.decimal(@alignOf(e.T)), cxx ++ " does not have alignment " ++ ctype.decimal(@alignOf(e.T)) ++ ", the alignment of " ++ @typeName(e.T));
             out = out ++ abiCheck(e, a, cxx);
+            out = out ++ baseChecks(e, a, cxx);
             if (e.offsets) out = out ++ offsetChecks(e, a, cxx);
         }
     }
@@ -412,6 +421,30 @@ fn abiCheck(comptime e: Entry, comptime a: []const u8, comptime cxx: []const u8)
     };
 }
 
+/// The inheritance facts a binding declares. `__is_base_of` catches a
+/// `cpp_bases` entry that names the wrong class; `__is_polymorphic` catches
+/// a vtable pointer the calculator put in or left out, which the size check
+/// alone would not, since the class's own members shift to absorb it.
+fn baseChecks(comptime e: Entry, comptime a: []const u8, comptime cxx: []const u8) []const u8 {
+    if (@typeInfo(e.T) != .@"struct") return "";
+    if (!@hasDecl(e.T, "cpp_bases") and !@hasDecl(e.T, "cpp_polymorphic") and !@hasDecl(e.T, "cpp_virtual_dtor")) return "";
+    inherit.checkSpan(e.T);
+    comptime var out: []const u8 = polymorphicCheck(e.T, a, cxx);
+    if (@hasDecl(e.T, "cpp_bases")) inline for (e.T.cpp_bases) |B| {
+        const b = cppsrc.pathName(ctype.fromZig(B).named.path);
+        out = out ++ assert("__is_base_of(" ++ b ++ ", " ++ a ++ ")", b ++ " is not a base of " ++ cxx ++ ", which " ++ @typeName(e.T) ++ "'s cpp_bases claims");
+        out = out ++ polymorphicCheck(B, b, b);
+    };
+    return out;
+}
+
+fn polymorphicCheck(comptime T: type, comptime a: []const u8, comptime cxx: []const u8) []const u8 {
+    return if (inherit.isPolymorphic(T))
+        assert("__is_polymorphic(" ++ a ++ ")", cxx ++ " has no virtual functions, but " ++ @typeName(T) ++ " says it does (cpp_polymorphic or cpp_virtual_dtor)")
+    else
+        assert("!__is_polymorphic(" ++ a ++ ")", cxx ++ " has virtual functions, which " ++ @typeName(T) ++ " does not declare (cpp_polymorphic = true)");
+}
+
 /// One `offsetof` per field, which is what catches a member the binding is
 /// missing, has in the wrong order, or spells at the wrong width.
 fn offsetChecks(comptime e: Entry, comptime a: []const u8, comptime cxx: []const u8) []const u8 {
@@ -445,6 +478,49 @@ test "render checks a class" {
     try expectContains(out, "static_assert(alignof(cppbindgen_t0) == 4,");
     try expectContains(out, "static_assert(offsetof(cppbindgen_t0, n) == 0,");
     try expectContains(out, "static_assert(__is_trivial(cppbindgen_t0) && __is_standard_layout(cppbindgen_t0),");
+}
+
+test "render checks bases and polymorphism" {
+    const mod = struct {
+        pub const Base = extern struct {
+            _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+            b: c_int,
+            pub const cpp_name = "ns::Base";
+            pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+            pub const cpp_virtual_dtor = true;
+        };
+        pub const Derived = extern struct {
+            _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+            d: c_int,
+            pub const cpp_name = "ns::Derived";
+            pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+            pub const cpp_bases: []const type = &.{Base};
+        };
+        pub const Plain = extern struct {
+            _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+            pub const cpp_name = "ns::Plain";
+            pub const cpp_abi: cpp.ClassAbi = .trivial_copy;
+            pub const cpp_bases: []const type = &.{Pod};
+        };
+        pub const Pod = extern struct {
+            n: c_int,
+            pub const cpp_name = "ns::Pod";
+        };
+    };
+    const out = comptime render(.{ .headers = &.{"b.h"}, .modules = &.{mod} });
+    // Aliases follow declaration order: t0 Base, t1 Derived, t2 Plain, t3 Pod.
+    try expectContains(out, "static_assert(__is_polymorphic(cppbindgen_t0),");
+    try expectContains(out, "static_assert(__is_base_of(ns::Base, cppbindgen_t1),");
+    try expectContains(out, "static_assert(__is_polymorphic(cppbindgen_t1),");
+    try expectContains(out, "static_assert(__is_polymorphic(ns::Base),");
+    try expectContains(out, "static_assert(__is_base_of(ns::Pod, cppbindgen_t2),");
+    try expectContains(out, "static_assert(!__is_polymorphic(cppbindgen_t2),");
+    try expectContains(out, "static_assert(!__is_polymorphic(ns::Pod),");
+    // The base span is not a member; the own member sits where the base ends,
+    // which is after its data on Itanium and after its whole size on MSVC.
+    try std.testing.expect(std.mem.indexOf(u8, out, "offsetof(cppbindgen_t1, _bases)") == null);
+    try expectContains(out, "static_assert(offsetof(cppbindgen_t0, b) == 8,");
+    try expectContains(out, "static_assert(offsetof(cppbindgen_t1, d) == " ++ (if (cpp.default_mangling == .msvc) "16" else "12") ++ ",");
 }
 
 test "render instantiates a specialization and forces a constructor" {

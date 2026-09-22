@@ -64,4 +64,29 @@ struct Rgb {
 inline Rgb rgb_make(int r, int g, int b) { return Rgb(r, g, b); }
 inline int rgb_total(Rgb c) { return c.total(); }
 
+// Base classes. The glue asserts the relation and the polymorphism, and each
+// derived class's own named member sits where the bases end, so its
+// `offsetof` check is a check of the placement too.
+struct Base {
+    int b;
+    Base(int x) : b(x) {}
+    virtual ~Base() {}
+    int baseGet() const { return b; }
+};
+struct Derived : Base {
+    int d;
+    Derived(int x, int y) : Base(x), d(y) {}
+    int derivedGet() const { return d * 10 + b; }
+};
+struct Side {
+    int s;
+    Side(int x) : s(x) {}
+    virtual ~Side() {}
+    int sideGet() const { return s; }
+};
+struct Multi : Base, Side {
+    int m;
+    Multi(int x, int y, int z) : Base(x), Side(y), m(z) {}
+};
+
 } // namespace inl

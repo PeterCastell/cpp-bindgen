@@ -163,6 +163,72 @@ const Holder = extern struct {
     pub const cpp_abi: ClassAbi = .managed_copy;
 };
 
+// Base classes; the C++ is in test/fixture.cpp and the placement rules in
+// inherit.zig. Node/Camera/EasyCam is a chain whose middle class has tail
+// padding, so the two ABIs put EasyCam's own member in different places.
+const Node = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    x: c_int,
+    pub const cpp_name = "ns::Node";
+    pub const cpp_abi: ClassAbi = .managed_copy;
+    pub const cpp_virtual_dtor = true;
+};
+const Camera = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    lens: f64,
+    tag: u8,
+    pub const cpp_name = "ns::Camera";
+    pub const cpp_abi: ClassAbi = .managed_copy;
+    pub const cpp_bases: []const type = &.{Node};
+};
+const EasyCam = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    easy: u8,
+    pub const cpp_name = "ns::EasyCam";
+    pub const cpp_abi: ClassAbi = .managed_copy;
+    pub const cpp_bases: []const type = &.{Camera};
+    /// The shape a binding gives a sketch: the upcast behind an accessor.
+    pub fn node(self: *EasyCam) *Node {
+        return cpp.basePtr(Node, self);
+    }
+};
+// A polymorphic class over a POD base: the vtable pointer goes first.
+const Pod = extern struct {
+    a: c_int,
+    c: u8,
+    pub const cpp_name = "ns::Pod";
+};
+const PolyOverPod = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    d: u8,
+    pub const cpp_name = "ns::PolyOverPod";
+    pub const cpp_abi: ClassAbi = .managed_copy;
+    pub const cpp_bases: []const type = &.{Pod};
+    pub const cpp_virtual_dtor = true;
+};
+// Two polymorphic bases: a Right method through a Both* moves `this`.
+const Left = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    l: c_int,
+    pub const cpp_name = "ns::Left";
+    pub const cpp_abi: ClassAbi = .managed_copy;
+    pub const cpp_virtual_dtor = true;
+};
+const Right = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    r: c_int,
+    pub const cpp_name = "ns::Right";
+    pub const cpp_abi: ClassAbi = .managed_copy;
+    pub const cpp_virtual_dtor = true;
+};
+const Both = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    b: u8,
+    pub const cpp_name = "ns::Both";
+    pub const cpp_abi: ClassAbi = .managed_copy;
+    pub const cpp_bases: []const type = &.{ Left, Right };
+};
+
 const Case = struct { sig: Signature, itanium: []const u8, msvc: []const u8 };
 
 const cases = [_]Case{
@@ -249,6 +315,9 @@ const cases = [_]Case{
     .{ .sig = .{ .name = "count", .ret = c_int, .this = *const ListVec3 }, .itanium = "_ZNK3tpl4ListINS_3vecILi3EfLNS_9qualifierE1EEENS_5AllocIS3_EEE5countEv", .msvc = "?count@?$List@U?$vec@$02M$00@tpl@@U?$Alloc@U?$vec@$02M$00@tpl@@@2@@tpl@@QEBAHXZ" },
     .{ .sig = .{ .name = "get", .ret = *TVec3, .this = *const BoxPtr }, .itanium = "_ZNK3tpl3BoxIPNS_3vecILi3EfLNS_9qualifierE1EEEE3getEv", .msvc = "?get@?$Box@PEAU?$vec@$02M$00@tpl@@@tpl@@QEBAPEAU?$vec@$02M$00@2@XZ" },
     .{ .sig = .{ .name = "get", .ret = u8, .this = *const BoxChar }, .itanium = "_ZNK3tpl3BoxIcE3getEv", .msvc = "?get@?$Box@D@tpl@@QEBADXZ" },
+    // A base method through a derived `this` is the base's symbol.
+    .{ .sig = .{ .name = "nodeId", .class = Node, .ret = c_int, .this = *const EasyCam }, .itanium = "_ZNK2ns4Node6nodeIdEv", .msvc = "?nodeId@Node@ns@@QEBAHXZ" },
+    .{ .sig = .{ .name = "rightId", .class = Right, .ret = c_int, .this = *const Both }, .itanium = "_ZNK2ns5Right7rightIdEv", .msvc = "?rightId@Right@ns@@QEBAHXZ" },
     .{ .sig = .{ .name = "*", .args = &.{c_int}, .this = *Plain }, .itanium = "_ZN2ns5PlainC2Ei", .msvc = "??0Plain@ns@@QEAA@H@Z" },
     .{ .sig = .{ .name = "ns::Plain::*", .args = &.{c_int}, .this = *Plain }, .itanium = "_ZN2ns5PlainC2Ei", .msvc = "??0Plain@ns@@QEAA@H@Z" },
     .{ .sig = .{ .name = "~", .this = *Plain }, .itanium = "_ZN2ns5PlainD2Ev", .msvc = "??1Plain@ns@@QEAA@XZ" },
@@ -732,6 +801,72 @@ test "trampoline entry points by arity" {
     str_dtor(&out);
 
     try std.testing.expectEqual(base, live());
+}
+
+test "base classes" {
+    @setEvalBranchQuota(test_eval_branch_quota);
+    const msvc = cpp.default_mangling == .msvc;
+
+    // The layout the calculator produced, against the C++ compiler's.
+    try std.testing.expectEqual(if (msvc) 32 else 25, @offsetOf(EasyCam, "easy"));
+    try std.testing.expectEqual(bindFn(&.{}, usize, "ns::sizeof_easycam")(), @sizeOf(EasyCam));
+    try std.testing.expectEqual(bindFn(&.{}, usize, "ns::easy_offset")(), @offsetOf(EasyCam, "easy"));
+    try std.testing.expectEqual(bindFn(&.{}, usize, "ns::pod_offset")(), comptime cpp.baseOffset(PolyOverPod, Pod).?);
+    try std.testing.expectEqual(bindFn(&.{}, usize, "ns::right_offset")(), comptime cpp.baseOffset(Both, Right).?);
+    try std.testing.expectEqual(bindFn(&.{}, usize, "ns::sizeof_both")(), @sizeOf(Both));
+
+    // A base method two levels up, through the derived pointer: no adjustment.
+    const easy_ctor = bindMethod(*EasyCam, &.{}, void, "*");
+    const node_id = cpp.bind(.{ .name = "nodeId", .class = Node, .ret = c_int, .this = *const EasyCam });
+    const set_x = cpp.bind(.{ .name = "setX", .class = Node, .args = &.{c_int}, .this = *EasyCam });
+    const cam_id = cpp.bind(.{ .name = "camId", .class = Camera, .ret = c_int, .this = *const EasyCam });
+    var e: EasyCam = undefined;
+    easy_ctor(&e);
+    try std.testing.expectEqual('e', e.easy);
+    try std.testing.expectEqual(100, node_id(&e));
+    set_x(&e, 3);
+    try std.testing.expectEqual(3, e.node().x);
+    try std.testing.expectEqual(30 + 'c', cam_id(&e));
+
+    // A POD base behind the derived class's own vtable pointer.
+    const pop_ctor = bindMethod(*PolyOverPod, &.{}, void, "*");
+    const pod_sum = cpp.bind(.{ .name = "podSum", .class = Pod, .ret = c_int, .this = *const PolyOverPod });
+    var p: PolyOverPod = undefined;
+    pop_ctor(&p);
+    try std.testing.expectEqual('d', p.d);
+    try std.testing.expectEqual(42, pod_sum(&p));
+    try std.testing.expectEqual(40, cpp.basePtr(Pod, &p).a);
+
+    // The second of two polymorphic bases: `this` moves past the first.
+    const both_ctor = bindMethod(*Both, &.{}, void, "*");
+    const left_id = cpp.bind(.{ .name = "leftId", .class = Left, .ret = c_int, .this = *const Both });
+    const right_id = cpp.bind(.{ .name = "rightId", .class = Right, .ret = c_int, .this = *const Both });
+    const set_r = cpp.bind(.{ .name = "setR", .class = Right, .args = &.{c_int}, .this = *Both });
+    var b: Both = undefined;
+    both_ctor(&b);
+    try std.testing.expectEqual(7, left_id(&b));
+    try std.testing.expectEqual(9, right_id(&b));
+    set_r(&b, 11);
+    try std.testing.expectEqual(11, cpp.basePtr(Right, &b).r);
+    try std.testing.expectEqual(11, right_id(&b));
+    try std.testing.expectEqual('b', b.b);
+}
+
+test "call shapes of base methods" {
+    @setEvalBranchQuota(test_eval_branch_quota);
+    // A base at offset 0 needs no adjustment, so the binding is the C++
+    // symbol itself; one that is not needs a wrapper to move `this`, and a
+    // wrapper is a Zig function with Zig's calling convention.
+    try std.testing.expectEqual(
+        *const fn (*const EasyCam) callconv(.c) c_int,
+        *const cpp.FnType(cpp.default_mangling, .{ .name = "nodeId", .class = Node, .ret = c_int, .this = *const EasyCam }),
+    );
+    try std.testing.expectEqual(
+        *const fn (*const Both) c_int,
+        *const cpp.FnType(cpp.default_mangling, .{ .name = "rightId", .class = Right, .ret = c_int, .this = *const Both }),
+    );
+    try std.testing.expectEqual(0, comptime cpp.baseOffset(EasyCam, Node).?);
+    try std.testing.expectEqual(16, comptime cpp.baseOffset(Both, Right).?);
 }
 
 test "a wrapper past ten parameters takes its arguments as a tuple" {

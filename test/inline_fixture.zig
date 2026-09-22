@@ -56,6 +56,53 @@ pub const Rgb = extern struct {
     pub const cpp_abi: cpp.ClassAbi = .trivial_copy;
 };
 
+// Base classes. `_bases` is every base subobject, placed by cpp-bindgen from
+// `cpp_bases`; a method of a base is bound with `.class` naming the base and
+// `this` the derived class, and the binder moves `this` when the base is not
+// at offset 0 (`Multi.side_get`).
+pub const Base = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    b: c_int,
+    pub const cpp_name = "inl::Base";
+    pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+    pub const cpp_virtual_dtor = true;
+
+    pub const ctor: Signature = .{ .name = "*", .args = &.{c_int}, .this = *@This() };
+    pub const get: Signature = .{ .name = "baseGet", .ret = c_int, .this = *const @This() };
+};
+
+pub const Derived = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    d: c_int,
+    pub const cpp_name = "inl::Derived";
+    pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+    pub const cpp_bases: []const type = &.{Base};
+
+    pub const ctor: Signature = .{ .name = "*", .args = &.{ c_int, c_int }, .this = *@This() };
+    pub const get: Signature = .{ .name = "derivedGet", .ret = c_int, .this = *const @This() };
+    pub const base_get: Signature = .{ .name = "baseGet", .class = Base, .ret = c_int, .this = *const @This() };
+};
+
+pub const Side = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    s: c_int,
+    pub const cpp_name = "inl::Side";
+    pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+    pub const cpp_virtual_dtor = true;
+};
+
+pub const Multi = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    m: c_int,
+    pub const cpp_name = "inl::Multi";
+    pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+    pub const cpp_bases: []const type = &.{ Base, Side };
+
+    pub const ctor: Signature = .{ .name = "*", .args = &.{ c_int, c_int, c_int }, .this = *@This() };
+    pub const base_get: Signature = .{ .name = "baseGet", .class = Base, .ret = c_int, .this = *const @This() };
+    pub const side_get: Signature = .{ .name = "sideGet", .class = Side, .ret = c_int, .this = *const @This() };
+};
+
 // Free functions, and the methods of classes that keep theirs at module
 // scope. A `Signature` constant is what the scan picks up, and `cpp.bind`
 // takes the same value, so the glue and the call can never describe

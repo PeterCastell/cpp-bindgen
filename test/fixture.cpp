@@ -273,3 +273,44 @@ namespace ns {
         return *v[pick % 9];
     }
 }
+
+// Base classes. Node/Camera/EasyCam is a chain whose middle class has tail
+// padding, so the two ABIs place EasyCam's member differently; PolyOverPod
+// puts its own vtable pointer ahead of a POD base; Both has two polymorphic
+// bases, so a Right method called through a Both* needs `this` moved past
+// Left. The offsets are handed back as measured, for the Zig side to compare.
+namespace ns {
+    struct Node { int x; Node(); virtual ~Node(); int nodeId() const; void setX(int v); };
+    Node::Node() : x(1) {}
+    Node::~Node() {}
+    int Node::nodeId() const { return x * 100; }
+    void Node::setX(int v) { x = v; }
+    struct Camera : Node { double lens; char tag; Camera(); int camId() const; };
+    Camera::Camera() : lens(2.5), tag('c') {}
+    int Camera::camId() const { return x * 10 + tag; }
+    struct EasyCam : Camera { char easy; EasyCam(); };
+    EasyCam::EasyCam() : easy('e') {}
+    size_t sizeof_easycam() { return sizeof(EasyCam); }
+    size_t easy_offset() { EasyCam e; return (size_t)((char*)&e.easy - (char*)&e); }
+
+    struct Pod { int a; char c; int podSum() const; };
+    int Pod::podSum() const { return a + c; }
+    struct PolyOverPod : Pod { char d; PolyOverPod(); virtual ~PolyOverPod(); };
+    PolyOverPod::PolyOverPod() : d('d') { a = 40; c = 2; }
+    PolyOverPod::~PolyOverPod() {}
+    size_t pod_offset() { PolyOverPod p; return (size_t)((char*)static_cast<Pod*>(&p) - (char*)&p); }
+
+    struct Left { int l; Left(); virtual ~Left(); int leftId() const; };
+    Left::Left() : l(7) {}
+    Left::~Left() {}
+    int Left::leftId() const { return l; }
+    struct Right { int r; Right(); virtual ~Right(); int rightId() const; void setR(int v); };
+    Right::Right() : r(9) {}
+    Right::~Right() {}
+    int Right::rightId() const { return r; }
+    void Right::setR(int v) { r = v; }
+    struct Both : Left, Right { char b; Both(); };
+    Both::Both() : b('b') {}
+    size_t sizeof_both() { return sizeof(Both); }
+    size_t right_offset() { Both x; return (size_t)((char*)static_cast<Right*>(&x) - (char*)&x); }
+}
