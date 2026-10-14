@@ -19,6 +19,8 @@ pub const emit = @import("emit.zig");
 const inherit = @import("inherit.zig");
 const itanium = @import("itanium.zig");
 const msvc = @import("msvc.zig");
+pub const vtable = @import("vtable.zig");
+const subclass = @import("subclass.zig");
 
 pub const Kind = ctype.Kind;
 pub const wchar_t = ctype.wchar_t;
@@ -37,6 +39,9 @@ pub const BaseSpan = inherit.BaseSpan;
 pub const baseAlign = inherit.baseAlign;
 pub const basePtr = inherit.basePtr;
 pub const baseOffset = inherit.baseOffset;
+pub const firstNamed = vtable.firstNamed;
+pub const verifyVtable = vtable.verify;
+pub const Subclass = subclass.Subclass;
 
 pub const Mangling = enum { itanium, msvc };
 
@@ -77,9 +82,15 @@ pub const Signature = struct {
     /// declared form, MSVC the substituted one, and this gives both.
     template_args: []const TemplateArg = &.{},
     /// The method is declared `virtual`. Only MSVC mangles the difference;
-    /// the call is still a direct call to that class's implementation.
+    /// `bind` still makes a direct call to that class's implementation, and
+    /// `bindVirtual` makes the virtual call.
     /// Destructors take this from the class's `cpp_virtual_dtor` instead.
     virtual: bool = false,
+    /// The method is pure virtual (`= 0`), which implies `virtual`. Its
+    /// vtable slot holds the ABI's pure-call handler, a `Subclass` must
+    /// override it, and the glue forces no definition for it, since it
+    /// usually has none.
+    pure: bool = false,
 };
 
 // Declarations a Zig type may carry to describe its C++ class, read by
@@ -100,6 +111,12 @@ pub const Signature = struct {
 //   `cpp_virtual_dtor`; needed only for a class whose destructor is not
 //   virtual but something else is, since it decides whether a vtable
 //   pointer precedes the bases.
+// - `cpp_virtuals: []const Signature`: the virtual functions the class
+//   declares, in header order, the destructor and overrides included. From
+//   these lists `vtable.tables` computes every slot of every vtable (see
+//   `vtable.zig`).
+// - `cpp_no_rtti: bool`: the class's vtable was compiled without RTTI, so a
+//   `Subclass` of it carries none either (see `subclass.zig`).
 //
 // A constructor is bound as a method named `"*"` (or `"ns::Class::*"`) with
 // a `*T` self and `void` return; a destructor as `"~"`, with no arguments.
@@ -212,6 +229,7 @@ pub fn bind(comptime sig: Signature) *const FnType(default_mangling, sig) {
 /// symbol's own `callconv(.c)` type; one that needs a wrapper gets the
 /// wrapper's. Which of the two applies depends on the mangling.
 pub fn FnType(comptime mangling: Mangling, comptime sig: Signature) type {
+    @setEvalBranchQuota(1 << 20);
     const r = comptime substituted(sig);
     const f = comptime describe(sig);
     const plan = comptime planFor(mangling, r, f);
@@ -219,6 +237,74 @@ pub fn FnType(comptime mangling: Mangling, comptime sig: Signature) type {
         return IdentityFnType(sig);
     }
     return TrampolineFnType(sig);
+}
+
+/// A member function's C call as its *callee* receives it: what a function
+/// standing in for the C++ definition, such as a `Subclass` override, has to
+/// accept and hand back. It is `bind`'s call seen from the other side.
+pub const CalleeShape = struct {
+    /// The C parameters, `this` and any hidden return pointer included.
+    params: []const type,
+    /// What the callee returns. With a hidden return pointer, that pointer:
+    /// the callee hands it back on both ABIs.
+    ret: type,
+    this_index: usize,
+    /// Where the hidden return pointer is in `params`, if there is one.
+    ret_index: ?usize,
+    /// `FnType`'s parameters and return type: what `bind` takes and gives.
+    visible_params: []const type,
+    visible_ret: type,
+    /// Where each of `visible_params` is in `params`.
+    from: []const usize,
+    /// Which of `visible_params` is `this`.
+    this_visible: usize,
+    /// Whether the hidden return pointer is one of `visible_params` (a
+    /// `.managed_copy` out-pointer) rather than behind `visible_ret`.
+    ret_visible: bool,
+    /// Indices into `visible_params` of the `.managed_copy` arguments the
+    /// callee destroys: every one on MSVC, none on Itanium.
+    destroy: []const usize,
+};
+
+/// The callee's side of a member function's call. `.class` is ignored: a
+/// virtual function's slot receives `this` already moved to its table.
+pub fn calleeShape(comptime mangling: Mangling, comptime sig: Signature) CalleeShape {
+    comptime {
+        @setEvalBranchQuota(1 << 20);
+        var u = substituted(sig);
+        u.class = null;
+        if (u.this == null) @compileError(sig.name ++ ": only a member function has a callee shape");
+        const plan = planFor(mangling, u, describe(u));
+        const V = visibleParams(u);
+        const managed_ret = classAbi(u.ret) == .managed_copy;
+        const this_visible: usize = if (managed_ret) 1 else 0;
+        var from: []const usize = &.{};
+        for (0..V.len) |v| {
+            const i = for (plan.sources, 0..) |src, i| {
+                if (src == .visible and src.visible == v) break i;
+            } else unreachable;
+            from = from ++ &[_]usize{i};
+        }
+        const ret_index: ?usize = if (managed_ret) from[0] else for (plan.sources, 0..) |src, i| {
+            if (src == .tmp_ret) break i;
+        } else null;
+        var destroy: []const usize = &.{};
+        if (mangling == .msvc) for (u.args, 0..) |A, k| {
+            if (classAbi(A) == .managed_copy) destroy = destroy ++ &[_]usize{this_visible + 1 + k};
+        };
+        return .{
+            .params = plan.ext_params,
+            .ret = if (ret_index) |i| plan.ext_params[i] else plan.ext_ret,
+            .this_index = plan.this_ext.?,
+            .ret_index = ret_index,
+            .visible_params = V,
+            .visible_ret = visibleRet(u),
+            .from = from,
+            .this_visible = this_visible,
+            .ret_visible = managed_ret,
+            .destroy = destroy,
+        };
+    }
 }
 
 /// Like `bind`, with an explicit mangling. Useful for a `windows-gnu` build
@@ -231,8 +317,72 @@ pub fn bindWithMangling(comptime mangling: Mangling, comptime sig: Signature) *c
     if (comptime plan.isIdentity(r)) {
         return @extern(*const IdentityFnType(sig), .{ .name = name });
     }
-    const ext = @extern(*const @Fn(plan.ext_params, &@splat(.{}), plan.ext_ret, .{ .@"callconv" = .c }), .{ .name = name });
-    return &trampoline(mangling, r, plan, ext);
+    const ext = @extern(*const ExtFnType(plan), .{ .name = name });
+    return &trampoline(mangling, r, plan, Direct(ext), false);
+}
+
+/// Binds a virtual function for a *virtual* call: the function comes from
+/// the object's vtable, so an override runs, whichever class defines it and
+/// whether it is C++ or Zig. `bind` on the same signature calls that one
+/// class's definition directly, as a qualified call would in C++.
+///
+/// The result has `bind`'s type, so a binding can switch between the two by
+/// name alone. The signature is the one `bind` takes, with `.virtual = true`;
+/// `.class` names a base of what `this` points at, and the call then goes
+/// through that base's vtable. The class `this` points at needs
+/// `cpp_virtuals` all the way down (see `vtable.zig`).
+pub fn bindVirtual(comptime sig: Signature) *const FnType(default_mangling, sig) {
+    @setEvalBranchQuota(1 << 20);
+    const r = comptime substituted(sig);
+    const f = comptime describe(sig);
+    const Self = comptime checkVirtualCall(sig);
+    const loc = comptime vtable.slotOf(Self, sig);
+    // `this` goes to the subobject whose vtable holds the slot, not to the
+    // base the name belongs to: `loc.offset` already accounts for both.
+    const unadjusted = comptime blk: {
+        var u = r;
+        u.class = null;
+        break :blk u;
+    };
+    const plan = comptime planFor(default_mangling, unadjusted, f);
+    const Ext = ExtFnType(plan);
+    const Callee = struct {
+        inline fn get(ext_args: *@Tuple(plan.ext_params)) *const Ext {
+            const i = comptime plan.this_ext.?;
+            const sub = @intFromPtr(ext_args[i]) + loc.offset;
+            ext_args[i] = @ptrFromInt(sub);
+            const vptr: *const [*]const *const anyopaque = @ptrFromInt(sub);
+            return @ptrCast(vptr.*[loc.index]);
+        }
+    };
+    const c_abi = comptime planFor(default_mangling, r, f).isIdentity(r);
+    return &trampoline(default_mangling, unadjusted, plan, Callee, c_abi);
+}
+
+/// The class whose vtable a virtual call reads.
+fn checkVirtualCall(comptime sig: Signature) type {
+    const Self = sig.this orelse @compileError(sig.name ++ ": a virtual call needs a `this`");
+    const C = thisPointee(sig.name, Self);
+    if (std.mem.eql(u8, sig.name, "*") or std.mem.eql(u8, sig.name, "~"))
+        @compileError(sig.name ++ ": a constructor or destructor cannot be called virtually through bindVirtual; call it with bind");
+    if (!sig.virtual and !sig.pure) @compileError(sig.name ++ ": bindVirtual needs .virtual = true");
+    if (std.mem.indexOf(u8, sig.name, "::") != null)
+        @compileError(sig.name ++ ": bindVirtual needs a bare name, with the base in .class if it is not the class `this` points at");
+    _ = thisAdjust(sig); // checks that `.class` is a base
+    return C;
+}
+
+fn ExtFnType(comptime plan: Plan) type {
+    return @Fn(plan.ext_params, &@splat(.{}), plan.ext_ret, .{ .@"callconv" = .c });
+}
+
+/// The callee a trampoline calls when it is one fixed symbol.
+fn Direct(comptime ext: anytype) type {
+    return struct {
+        inline fn get(_: anytype) @TypeOf(ext) {
+            return ext;
+        }
+    };
 }
 
 /// Where a parameter of the real extern function comes from.
@@ -254,6 +404,8 @@ const Plan = struct {
     /// Visible indices of managed_copy arguments the caller destroys after the call.
     destroy: []const usize,
     ret_from_tmp: bool,
+    /// The index of `this` in `ext_params`, for a member function.
+    this_ext: ?usize = null,
 
     fn isIdentity(comptime p: Plan, comptime sig: Signature) bool {
         if (p.ret_from_tmp or p.destroy.len > 0 or p.ext_ret != visibleRet(sig)) return false;
@@ -283,6 +435,7 @@ fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: cty
     comptime var ext_params: []const type = &.{};
     comptime var sources: []const Source = &.{};
     comptime var destroy: []const usize = &.{};
+    comptime var this_ext: ?usize = null;
 
     // Hidden return pointer: before `this` on Itanium, after it on MSVC.
     if (hidden_ret and mangling == .itanium) {
@@ -290,6 +443,7 @@ fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: cty
         sources = sources ++ &[_]Source{ret_src};
     }
     if (sig.this) |T| {
+        this_ext = ext_params.len;
         const adjust = thisAdjust(sig);
         if (adjust == 0) {
             ext_params = ext_params ++ &[_]type{T};
@@ -323,6 +477,7 @@ fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: cty
         .sources = sources,
         .destroy = destroy,
         .ret_from_tmp = hidden_ret and !managed_ret,
+        .this_ext = this_ext,
     };
 }
 
@@ -330,9 +485,16 @@ fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: cty
 /// `plan`. A function body cannot take a generated parameter list, so there
 /// is one entry point per arity and a last one, `fN`, that takes the whole
 /// argument list as a tuple for the arities no named entry point covers.
-fn trampoline(comptime mangling: Mangling, comptime sig: Signature, comptime plan: Plan, comptime extern_func: anytype) TrampolineFnType(sig) {
+///
+/// `Callee.get` yields the function to call from the real argument list,
+/// which it may also adjust: one fixed symbol (`Direct`), or a vtable slot.
+/// With `c_abi` the entry points take the C calling convention and the type
+/// is `IdentityFnType`, for a call whose shape needs no wrapper but whose
+/// callee is only known at run time.
+fn trampoline(comptime mangling: Mangling, comptime sig: Signature, comptime plan: Plan, comptime Callee: type, comptime c_abi: bool) if (c_abi) IdentityFnType(sig) else TrampolineFnType(sig) {
     const V = comptime visibleParams(sig);
     const R = comptime visibleRet(sig);
+    const cc: std.builtin.CallingConvention = if (c_abi) .c else .auto;
     const T = struct {
         inline fn invoke(args: @Tuple(V)) R {
             var tmp: (if (plan.ret_from_tmp) R else void) = undefined;
@@ -345,44 +507,45 @@ fn trampoline(comptime mangling: Mangling, comptime sig: Signature, comptime pla
                     .hidden_int => |c| c,
                 };
             }
-            const r = @call(.auto, extern_func, ext_args);
+            const callee = Callee.get(&ext_args);
+            const r = @call(.auto, callee, ext_args);
             inline for (plan.destroy) |v| {
                 const dtor = comptime bindWithMangling(mangling, .{ .name = "~", .this = V[v] });
                 dtor(args[v]);
             }
             return if (plan.ret_from_tmp) tmp else r;
         }
-        fn f0() R {
+        fn f0() callconv(cc) R {
             return invoke(.{});
         }
-        fn f1(a: V[0]) R {
+        fn f1(a: V[0]) callconv(cc) R {
             return invoke(.{a});
         }
-        fn f2(a: V[0], b: V[1]) R {
+        fn f2(a: V[0], b: V[1]) callconv(cc) R {
             return invoke(.{ a, b });
         }
-        fn f3(a: V[0], b: V[1], c: V[2]) R {
+        fn f3(a: V[0], b: V[1], c: V[2]) callconv(cc) R {
             return invoke(.{ a, b, c });
         }
-        fn f4(a: V[0], b: V[1], c: V[2], d: V[3]) R {
+        fn f4(a: V[0], b: V[1], c: V[2], d: V[3]) callconv(cc) R {
             return invoke(.{ a, b, c, d });
         }
-        fn f5(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4]) R {
+        fn f5(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4]) callconv(cc) R {
             return invoke(.{ a, b, c, d, e });
         }
-        fn f6(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5]) R {
+        fn f6(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5]) callconv(cc) R {
             return invoke(.{ a, b, c, d, e, g });
         }
-        fn f7(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6]) R {
+        fn f7(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6]) callconv(cc) R {
             return invoke(.{ a, b, c, d, e, g, h });
         }
-        fn f8(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7]) R {
+        fn f8(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7]) callconv(cc) R {
             return invoke(.{ a, b, c, d, e, g, h, i });
         }
-        fn f9(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7], j: V[8]) R {
+        fn f9(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7], j: V[8]) callconv(cc) R {
             return invoke(.{ a, b, c, d, e, g, h, i, j });
         }
-        fn f10(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7], j: V[8], k: V[9]) R {
+        fn f10(a: V[0], b: V[1], c: V[2], d: V[3], e: V[4], g: V[5], h: V[6], i: V[7], j: V[8], k: V[9]) callconv(cc) R {
             return invoke(.{ a, b, c, d, e, g, h, i, j, k });
         }
         fn fN(args: @Tuple(V)) R {
@@ -401,7 +564,7 @@ fn trampoline(comptime mangling: Mangling, comptime sig: Signature, comptime pla
         8 => T.f8,
         9 => T.f9,
         10 => T.f10,
-        else => T.fN,
+        else => if (c_abi) @compileError(sig.name ++ ": a virtual call with more than ten parameters needs a wrapper; this shape has none") else T.fN,
     };
 }
 
@@ -461,7 +624,7 @@ pub fn describe(comptime sig: Signature) ctype.Function {
         .is_static = sig.this == null and sig.class != null,
         .special = special,
         .op = named.op,
-        .is_virtual = sig.virtual,
+        .is_virtual = sig.virtual or sig.pure,
     };
     if (sig.this) |Self| {
         const Class = thisPointee(sig.name, Self);
@@ -555,6 +718,8 @@ test {
     _ = emit;
     _ = @import("cppsrc.zig");
     _ = inherit;
+    _ = vtable;
+    _ = subclass;
     _ = itanium;
     _ = msvc;
     _ = @import("testing.zig");

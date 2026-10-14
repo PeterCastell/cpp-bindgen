@@ -143,6 +143,8 @@ order its declaration gives it, and Zig reorders the fields of a plain struct.
 - `cpp_polymorphic` — the class has virtual functions. `cpp_virtual_dtor` implies
   it; declare it only for a class whose destructor is not virtual but something
   else is.
+- `cpp_virtuals` — the virtual functions the class declares, in header order. See
+  [Virtual functions](#virtual-functions).
 
 The default `cpp_abi` is `.c_struct`. That value is correct for plain data, and wrong
 for a class with a constructor, a destructor, or a virtual function. Declare the
@@ -206,6 +208,152 @@ Virtual bases have no fixed offset and are refused. The glue asserts that each b
 a base of the class and that each is polymorphic exactly when the binding says, and
 the derived class's own member offsets — which sit where the bases end — are checked
 as they always were.
+
+### Virtual functions
+
+A polymorphic class can list the virtual functions it declares. From those lists,
+`cpp.vtable.tables(T)` computes every vtable of `T`: where each one sits, and which
+function each slot holds.
+
+```zig
+pub const Node = extern struct {
+    // ...
+    pub const customDraw_renderer: cpp.Signature = .{ .name = "customDraw", .this = *const Node, .args = &.{*const BaseRenderer}, .virtual = true };
+    pub const customDraw: cpp.Signature = .{ .name = "customDraw", .this = *Node, .virtual = true };
+    pub const cpp_virtuals: []const cpp.Signature = &.{
+        .{ .name = "~", .this = *Node },
+        customDraw_renderer,
+        customDraw,
+    };
+};
+```
+
+The list is the order the header declares them in. It includes the destructor and
+every override, and leaves out what the class only inherits. A class that declares
+no virtual function of its own writes `&.{}`. Each entry is spelled as you would bind
+it, with `.virtual = true` (a destructor takes that from `cpp_virtual_dtor`). A pure
+virtual function (`= 0`) is `.pure = true` instead; the glue then forces no
+definition for it, since it usually has none.
+
+One list is correct on both ABIs. Itanium lays out new virtuals in declaration
+order. MSVC groups overloads, puts each group where its *name* is first declared,
+and reverses each group. The first declaration of a name may be something the list
+does not hold, such as a non-virtual method or a using-declaration. If it comes
+before the name's first entry, put `cpp.firstNamed("name")` in the list at that
+point. The marker takes no slot, and Itanium ignores it:
+
+```zig
+// struct D : B { void g(int); virtual void h(); virtual void g(); };
+pub const cpp_virtuals: []const cpp.Signature = &.{ cpp.firstNamed("g"), h, g };
+```
+
+A missing or misplaced entry moves every slot after it. `cpp.verifyVtable(T)` finds
+that: it reads the vtables the C++ compiler emitted for `T` and checks that every
+method slot holds the function the computed layout says. Call it from a test, once
+per class:
+
+```zig
+test "vtables" {
+    try cpp.verifyVtable(of.Camera);
+    try cpp.verifyVtable(of.BaseApp);
+}
+```
+
+It needs no object, only the class's vtable linked in. A pure virtual's slot must
+hold the C++ runtime's pure-call handler. It cannot check destructor slots or
+thunks, which hold compiler-generated code. Nor can it see an entry missing from the
+very end of a table: MSVC records no table's length, and Itanium records one only
+through the next table's header. Run it in a build
+without identical code folding, which can merge two functions whose bodies match.
+
+#### Virtual calls
+
+`bind` calls one class's definition directly, as a qualified call would in C++. On a
+`Camera` that is really an `EasyCam`, `cpp.bind(Camera.begin)` runs
+`ofCamera::begin` and skips the override. `cpp.bindVirtual` makes the virtual call: it
+loads the function from the object's vtable, so the override runs, whichever class
+defines it.
+
+```zig
+cpp.bindVirtual(Camera.begin)(camera);   // EasyCam::begin, if that is what camera is
+```
+
+It takes the signature `bind` takes and returns a function of the same type, so a
+wrapper switches by name alone. With `.class` naming a base of what `this` points
+at, the call goes through that base's vtable, with `this` moved to it. The class
+that `this` points at needs `cpp_virtuals` all the way down.
+
+#### Subclassing from Zig
+
+`cpp.Subclass(Base, Outer, "field")` makes a Zig type a `Base` to C++, overrides
+and all, with no C++ of its own. It is a field with exactly `Base`'s layout, and the
+Zig type around it is any struct:
+
+```zig
+const OrbitCam = struct {
+    cpp: cpp.Subclass(of.Camera, OrbitCam, "cpp"),
+    angle: f32 = 0,
+    trail: std.ArrayList(of.Vec3) = .empty,
+
+    pub const cpp_overrides = .{
+        .{ of.Camera.begin_viewport, beginViewport },
+        .{ of.Node.onPositionChanged, positionChanged },
+    };
+
+    fn beginViewport(self: *OrbitCam, viewport: *const of.Rectangle) void {
+        self.angle += 0.01;
+        cpp.bind(of.Camera.begin_viewport)(&self.cpp.base, viewport); // "super"
+    }
+
+    fn positionChanged(self: *OrbitCam) void { ... }
+
+    /// Runs before ~ofCamera(), as a C++ destructor body would.
+    pub fn cpp_destroy(self: *OrbitCam) void {
+        self.trail.deinit(gpa);
+    }
+};
+
+var orbit: OrbitCam = .{ .cpp = undefined };
+orbit.cpp.init();          // ofCamera(), then OrbitCam's vtables
+defer orbit.cpp.deinit();  // cpp_destroy, then ~ofCamera()
+```
+
+- `cpp_overrides` pairs each override with the signature it overrides, from any
+  class in the chain. It is a list rather than a naming convention because C++
+  overloads virtual functions and Zig cannot. The method takes `*Outer`, then the
+  parameters of `bind`'s function other than `this`, and returns what it returns.
+  So a `.managed_copy` result arrives as an out-pointer to construct it in, and a
+  `.managed_copy` argument as a pointer the method borrows. The argument is
+  destroyed after the method returns, by whichever side the ABI makes responsible.
+- `cpp_destroy` is the destructor body. `cpp_free` releases the memory when C++
+  deletes the object; without it, a `delete` from C++ panics, because C++ cannot
+  know how Zig allocated it.
+- `init` runs the base's default constructor, `initWith(ctor, args)` another one.
+  In a safe build, either checks the vtables the constructor installed against the
+  computed layout first, and panics naming the slot if a `cpp_virtuals` list is
+  wrong. `initChecked` returns the mismatch instead, in any build.
+
+The vtables are `const` arrays built at comptime. A slot holds an adapter for an
+override, a generated destructor, or the base's own definition. C++ never names
+the Zig type, only the base, so the RTTI is the base's: `dynamic_cast` to the base
+or above works, and `typeid` names the base. A base whose vtable was compiled
+without RTTI declares `cpp_no_rtti = true`.
+
+A base with pure virtual functions is abstract, and a `Subclass` of it must
+override every one, as in C++; one it leaves out is a compile error.
+
+The base destructor runs through the base's own vtable, not by name. An implicit
+destructor often has no symbol of its own: in an optimized build, MSVC folds it into
+the deleting destructor, and Itanium points the vtable at the base's destructor
+instead. An abstract base is the exception. Clang emits all of an abstract class's
+destructors except the base-object one as traps, the ones in its vtable included,
+because C++ never calls them. So an abstract base is destroyed by name, and if its
+destructor is implicit, declare its `Signature` so that the glue emits it. A base
+whose destructor is not virtual has no slot, and is taken to have a trivial one.
+
+A virtual call from inside the base constructor or destructor reaches the base, as
+in C++. An object that registers its own address somewhere cannot move; one that
+does not can, since its vtables are static.
 
 ## Glue
 
@@ -341,6 +489,7 @@ name.
   compile.
 - A class with a virtual base cannot declare `cpp_bases`: the base has no fixed
   offset. Spell its layout by hand, and reach the base through a C++ thunk.
+- `Subclass` does not support virtual bases, or `delete[]` from C++.
 - The library reads no headers. You write each signature, and you keep it correct
   when the C++ changes. The glue checks the types; it cannot check a signature.
 - The glue generator runs on the build machine, so it needs a target the build
@@ -359,7 +508,12 @@ test binary binds `test/inline_fixture.hpp`, which defines everything inline and
 no symbols of its own: it links only because the generated glue emitted them. Both
 bind base-class methods through derived pointers, including one whose base is not at
 offset 0, and `src/inherit.zig` checks the computed base placement against numbers
-read from clang's `-fdump-record-layouts` for the same C++. On a Windows x86_64 host
+read from clang's `-fdump-record-layouts` for the same C++. `src/vtable.zig` checks
+its computed slot layouts against `-fdump-vtable-layouts`, then against the real
+vtables of `test/vtable_fixture.cpp`, and makes virtual calls through them;
+`src/subclass.zig` subclasses those classes from Zig and drives the subclasses from
+the C++ side. `test/vtable_optimized.cpp` is compiled with `-O2`, as a release build
+of a C++ library would be. On a Windows x86_64 host
 with MSVC and the Windows SDK, `zig build test-msvc` repeats all of it with the MSVC
 ABI, where those numbers differ.
 

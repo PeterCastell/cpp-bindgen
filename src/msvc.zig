@@ -83,6 +83,18 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
     return out ++ "Z";
 }
 
+/// A per-vfptr symbol of `class`: `??_7` for the vftable, `??_R4` for its
+/// RTTI locator. `6B` is a const object; then the classes that tell this
+/// vfptr apart from the class's others (`vtable.Table.msvc_path`), each a
+/// qualified name, the whole list `@`-terminated. Names back-reference
+/// across the symbol: `??_7App@vt@@6BIn@1@@`.
+pub fn vfptrSymbol(comptime prefix: []const u8, comptime class: []const Component, comptime path: []const []const Component) []const u8 {
+    comptime var st = State{};
+    comptime var out: []const u8 = prefix ++ qualifiedName(class, &st) ++ "6B";
+    inline for (path) |p| out = out ++ qualifiedName(p, &st);
+    return out ++ "@";
+}
+
 /// `name@scope@outer@@`, innermost first.
 fn qualifiedName(comptime path: []const Component, comptime st: *State) []const u8 {
     comptime var out: []const u8 = "";

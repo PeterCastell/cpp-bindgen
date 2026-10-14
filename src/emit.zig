@@ -231,6 +231,9 @@ fn addSignatures(comptime list: []const ctype.Function, comptime container: type
     inline for (declNames(container)) |name| {
         const d = @field(container, name);
         if (@TypeOf(d) != Signature) continue;
+        // A `cpp.firstNamed` marker names no function, and a pure virtual
+        // function usually has no definition to force.
+        if (comptime cpp.vtable.isNameMarker(d) or d.pure) continue;
         out = addFn(out, cpp.describe(d));
     }
     return out;
@@ -626,8 +629,12 @@ test "render skips padding fields and honours opt-outs" {
             pub const cpp_no_offsets = true;
         };
         pub const f: Signature = .{ .name = "f", .ret = c_int, .this = *Poly, .virtual = true };
+        // Pure, and usually without a definition to force.
+        pub const g: Signature = .{ .name = "g", .ret = c_int, .this = *Poly, .pure = true };
+        pub const marker = cpp.firstNamed("g");
     };
     const out = comptime render(.{ .modules = &.{mod} });
+    try std.testing.expect(std.mem.indexOf(u8, out, "::g(") == null);
     try expectContains(out, "static_assert(offsetof(cppbindgen_t0, n) == 8,");
     try std.testing.expect(std.mem.indexOf(u8, out, "_vptr") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "template struct tpl::vec") == null);

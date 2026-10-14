@@ -77,6 +77,13 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
     return out;
 }
 
+/// A type's mangling on its own, as a special name such as `_ZTV` (the
+/// vtable) or `_ZTI` (the typeinfo) follows it with.
+pub fn typeName(comptime t: CType) []const u8 {
+    comptime var subs = Subs{};
+    return mangleType(t, &subs);
+}
+
 /// One spelling can be both unary and binary, and Itanium gives each its own
 /// code; the arity decides, exactly as it does in C++. A conversion operator
 /// carries its target type instead.

@@ -188,6 +188,23 @@ fn addTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
         else
             &.{ "-std=c++17", "-fno-inline" },
     });
+    // With RTTI, unlike the fixture above, so that a Zig subclass's RTTI can
+    // be compared with the C++ class's. `src/subclass.zig`'s tests supply the
+    // one symbol of the MSVC runtime that RTTI needs.
+    mod.addCSourceFile(.{
+        .file = b.path("test/vtable_fixture.cpp"),
+        .flags = if (is_msvc)
+            &.{ "-std=c++17", "-fno-inline", "-fno-autolink" }
+        else
+            &.{ "-std=c++17", "-fno-inline" },
+    });
+    mod.addCSourceFile(.{
+        .file = b.path("test/vtable_optimized.cpp"),
+        .flags = if (is_msvc)
+            &.{ "-std=c++17", "-O2", "-fno-autolink" }
+        else
+            &.{ "-std=c++17", "-O2" },
+    });
     const tests = b.addTest(.{ .name = name, .root_module = mod });
     return &b.addRunArtifact(tests).step;
 }
