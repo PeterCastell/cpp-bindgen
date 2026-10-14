@@ -13,6 +13,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+pub const abi = @import("abi.zig");
+const aarch64 = @import("aarch64.zig");
 pub const ctype = @import("ctype.zig");
 const cppsrc = @import("cppsrc.zig");
 pub const emit = @import("emit.zig");
@@ -97,6 +99,12 @@ pub const Signature = struct {
     /// the symbol; Itanium ignores it. The glue forces no definition for a
     /// non-public member, since it cannot name one from outside the class.
     access: Access = .public,
+    /// The function's `[[gnu::abi_tag(...)]]` strings, in any order. Itanium
+    /// mangles them into the name; MSVC has no such attribute. A header can
+    /// hide one behind a macro, but a binding that misses it fails to link
+    /// rather than calling the wrong function. libc++'s own tags are not
+    /// needed here: the glue compiles libc++ with them turned off.
+    abi_tags: []const []const u8 = &.{},
 };
 
 // Declarations a Zig type may carry to describe its C++ class, read by
@@ -270,6 +278,11 @@ pub const CalleeShape = struct {
     /// Indices into `visible_params` of the `.managed_copy` arguments the
     /// callee destroys: every one on MSVC, none on Itanium.
     destroy: []const usize,
+    /// The hidden return pointer, `params[0]`, arrives in x8 rather than in
+    /// an argument register, so a function receiving `params` is reached
+    /// through `aarch64.entryFromX8`, and one calling them through
+    /// `aarch64.call`.
+    via_x8: bool,
 };
 
 /// The callee's side of a member function's call. `.class` is ignored: a
@@ -309,6 +322,7 @@ pub fn calleeShape(comptime mangling: Mangling, comptime sig: Signature) CalleeS
             .this_visible = this_visible,
             .ret_visible = managed_ret,
             .destroy = destroy,
+            .via_x8 = plan.via_x8,
         };
     }
 }
@@ -358,7 +372,7 @@ pub fn bindVirtual(comptime sig: Signature) *const FnType(default_mangling, sig)
             const sub = @intFromPtr(ext_args[i]) + loc.offset;
             ext_args[i] = @ptrFromInt(sub);
             const vptr: *const [*]const *const anyopaque = @ptrFromInt(sub);
-            return @ptrCast(vptr.*[loc.index]);
+            return @ptrCast(@alignCast(vptr.*[loc.index]));
         }
     };
     const c_abi = comptime planFor(default_mangling, r, f).isIdentity(r);
@@ -412,26 +426,35 @@ const Plan = struct {
     ret_from_tmp: bool,
     /// The index of `this` in `ext_params`, for a member function.
     this_ext: ?usize = null,
+    /// The hidden return pointer, first in `ext_params`, goes in x8: the
+    /// call goes through `aarch64.x8Call`.
+    via_x8: bool = false,
 
     fn isIdentity(comptime p: Plan, comptime sig: Signature) bool {
-        if (p.ret_from_tmp or p.destroy.len > 0 or p.ext_ret != visibleRet(sig)) return false;
+        if (p.via_x8 or p.ret_from_tmp or p.destroy.len > 0 or p.ext_ret != visibleRet(sig)) return false;
         if (p.sources.len != visibleParams(sig).len) return false;
         inline for (p.sources, 0..) |src, i| if (src != .visible or src.visible != i) return false;
         return true;
     }
 };
 
-fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: ctype.Function) Plan {
-    const managed_ret = classAbi(sig.ret) == .managed_copy;
+/// Whether the call returns its result through a hidden pointer that
+/// `callconv(.c)` would not pass by itself.
+fn hiddenRet(comptime mangling: Mangling, comptime sig: Signature) bool {
     // MSVC returns a class through a hidden pointer from any instance member
     // function, whatever its size and however trivial it is; a free or static
     // function returning the same class uses a register. `.trivial_copy` is
     // indirect either way.
     const msvc_hidden = mangling == .msvc and
         (classAbi(sig.ret) == .trivial_copy or (sig.this != null and isClass(sig.ret)));
-    const hidden_ret = managed_ret or msvc_hidden;
-    if (hidden_ret and builtin.cpu.arch.isAARCH64())
-        @compileError(sig.name ++ ": returning a class through a hidden pointer is not supported on AArch64 yet (the pointer goes in x8)");
+    return classAbi(sig.ret) == .managed_copy or msvc_hidden;
+}
+
+fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: ctype.Function) Plan {
+    const managed_ret = classAbi(sig.ret) == .managed_copy;
+    const hidden_ret = hiddenRet(mangling, sig);
+    const where: abi.HiddenReturn = if (!hidden_ret) .first else abi.hiddenReturn(mangling) orelse
+        @compileError(sig.name ++ ": returning a class through a hidden pointer is not supported on this target and mangling yet");
 
     const RetPtr = *ctype.resolve(sig.ret);
     const ret_src: Source = if (managed_ret) .{ .visible = 0 } else .tmp_ret;
@@ -443,8 +466,8 @@ fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: cty
     comptime var destroy: []const usize = &.{};
     comptime var this_ext: ?usize = null;
 
-    // Hidden return pointer: before `this` on Itanium, after it on MSVC.
-    if (hidden_ret and mangling == .itanium) {
+    // x8 is laid out as `.first`: `x8Call` takes the pointer from there.
+    if (hidden_ret and (where == .first or where == .x8)) {
         ext_params = ext_params ++ &[_]type{RetPtr};
         sources = sources ++ &[_]Source{ret_src};
     }
@@ -459,7 +482,7 @@ fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: cty
             sources = sources ++ &[_]Source{.{ .adjusted = .{ .visible = this_idx, .offset = adjust } }};
         }
     }
-    if (hidden_ret and mangling == .msvc) {
+    if (hidden_ret and where == .after_this) {
         ext_params = ext_params ++ &[_]type{RetPtr};
         sources = sources ++ &[_]Source{ret_src};
     }
@@ -477,6 +500,8 @@ fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: cty
         ext_params = ext_params ++ &[_]type{c_int};
         sources = sources ++ &[_]Source{.{ .hidden_int = 1 }};
     }
+    const via_x8 = hidden_ret and where == .x8;
+    if (via_x8) aarch64.checkFits(sig.name, ext_params[1..]);
     return .{
         .ext_params = ext_params,
         .ext_ret = if (hidden_ret) void else visibleRet(sig),
@@ -484,6 +509,7 @@ fn planFor(comptime mangling: Mangling, comptime sig: Signature, comptime f: cty
         .destroy = destroy,
         .ret_from_tmp = hidden_ret and !managed_ret,
         .this_ext = this_ext,
+        .via_x8 = via_x8,
     };
 }
 
@@ -514,7 +540,7 @@ fn trampoline(comptime mangling: Mangling, comptime sig: Signature, comptime pla
                 };
             }
             const callee = Callee.get(&ext_args);
-            const r = @call(.auto, callee, ext_args);
+            const r = if (plan.via_x8) aarch64.call(plan.ext_params, @ptrCast(callee), ext_args) else @call(.auto, callee, ext_args);
             inline for (plan.destroy) |v| {
                 const dtor = comptime bindWithMangling(mangling, .{ .name = "~", .this = V[v] });
                 dtor(args[v]);
@@ -632,6 +658,7 @@ pub fn describe(comptime sig: Signature) ctype.Function {
         .op = named.op,
         .is_virtual = sig.virtual or sig.pure,
         .access = sig.access,
+        .abi_tags = sig.abi_tags,
     };
     if (sig.access != .public and sig.this == null and sig.class == null)
         @compileError(sig.name ++ ": only a class member has an access; give it a `this`, or a `.class` for a static member");
@@ -723,6 +750,8 @@ fn thisOf(comptime name: []const u8, comptime Self: type) ctype.Function.This {
 }
 
 test {
+    _ = abi;
+    _ = aarch64;
     _ = ctype;
     _ = emit;
     _ = @import("cppsrc.zig");

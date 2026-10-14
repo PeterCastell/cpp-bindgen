@@ -1,6 +1,7 @@
 //! Zig declarations of the types in test/fixture.cpp, golden mangled names
 //! from clang for both ABIs, and link tests through the target's mangling.
 const std = @import("std");
+const builtin = @import("builtin");
 const cpp = @import("root.zig");
 
 const Signature = cpp.Signature;
@@ -200,6 +201,40 @@ const Holder = extern struct {
     pub const cpp_abi: ClassAbi = .managed_copy;
 };
 
+// Standard-library names. Itanium spells them as libc++ declares them, in
+// `std::__1` but for the few libc++abi shares; MSVC's library has no inline
+// namespace. Only mangled here: no fixture defines them.
+const StdString = opaque {
+    pub const cpp_template = Template{ .name = "std::basic_string", .kind = .class, .args = &.{
+        .{ .type = u8 },
+        .{ .template = .{ .name = "std::char_traits", .args = &.{.{ .type = u8 }} } },
+        .{ .template = .{ .name = "std::allocator", .args = &.{.{ .type = u8 }}, .kind = .class } },
+    } };
+    pub const cpp_abi: ClassAbi = .managed_copy;
+};
+const StdException = opaque {
+    pub const cpp_name = "std::exception";
+    pub const cpp_kind: Kind = .class;
+};
+const StdExceptionPtr = opaque {
+    pub const cpp_name = "std::exception_ptr";
+    pub const cpp_kind: Kind = .class;
+    pub const cpp_abi: ClassAbi = .managed_copy;
+};
+const StdPath = opaque {
+    pub const cpp_name = "std::__fs::filesystem::path";
+    pub const cpp_kind: Kind = .class;
+};
+const StdPathFormat = enum(c_int) {
+    auto_format,
+    _,
+    pub const cpp_name = "std::__fs::filesystem::path::format";
+};
+const TplArg = extern struct {
+    x: c_int,
+    pub const cpp_name = "Foo";
+};
+
 // Base classes; the C++ is in test/fixture.cpp and the placement rules in
 // inherit.zig. Node/Camera/EasyCam is a chain whose middle class has tail
 // padding, so the two ABIs put EasyCam's own member in different places.
@@ -389,6 +424,20 @@ const cases = [_]Case{
     .{ .sig = .{ .name = "ns::str_len", .args = &.{Str}, .ret = usize }, .itanium = "_ZN2ns7str_lenENS_3StrE", .msvc = "?str_len@ns@@YA_KUStr@1@@Z" },
     .{ .sig = .{ .name = "get", .ret = Str, .this = *const Holder }, .itanium = "_ZNK2ns6Holder3getEv", .msvc = "?get@Holder@ns@@QEBA?AUStr@2@XZ" },
     .{ .sig = .{ .name = "take", .args = &.{Str}, .ret = usize, .this = *Holder }, .itanium = "_ZN2ns6Holder4takeENS_3StrE", .msvc = "?take@Holder@ns@@QEAA_KUStr@2@@Z" },
+    // The standard library. Itanium: `St` for `::std::`, then libc++'s `__1`,
+    // which becomes `S_`; `std::exception` and the rest of what libc++abi
+    // shares stay directly in `std`.
+    .{ .sig = .{ .name = "size", .ret = c_ulonglong, .this = *const StdString }, .itanium = "_ZNKSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4sizeEv", .msvc = "?size@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBA_KXZ" },
+    .{ .sig = .{ .name = "*", .args = &.{ [*:0]const u8, c_int }, .this = *StdString }, .itanium = "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEC2EPKci", .msvc = "??0?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAA@PEBDH@Z" },
+    .{ .sig = .{ .name = "~", .this = *StdString }, .itanium = "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEED2Ev", .msvc = "??1?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAA@XZ" },
+    .{ .sig = .{ .name = "k", .args = &.{ *StdString, *StdString } }, .itanium = "_Z1kPNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEES6_", .msvc = "?k@@YAXPEAV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@0@Z" },
+    .{ .sig = .{ .name = "h", .args = &.{ *StdException, Ref(*const StdException) } }, .itanium = "_Z1hPSt9exceptionRKS_", .msvc = "?h@@YAXPEAVexception@std@@AEBV12@@Z" },
+    .{ .sig = .{ .name = "std::terminate" }, .itanium = "_ZSt9terminatev", .msvc = "?terminate@std@@YAXXZ" },
+    .{ .sig = .{ .name = "__from_native_exception_pointer", .class = StdExceptionPtr, .args = &.{*anyopaque}, .ret = StdExceptionPtr }, .itanium = "_ZNSt13exception_ptr31__from_native_exception_pointerEPv", .msvc = "?__from_native_exception_pointer@exception_ptr@std@@SA?AV12@PEAX@Z" },
+    .{ .sig = .{ .name = "std::make_exception_ptr", .template_args = &.{.{ .type = c_int }}, .args = &.{TParam(0)}, .ret = StdExceptionPtr }, .itanium = "_ZSt18make_exception_ptrIiESt13exception_ptrT_", .msvc = "??$make_exception_ptr@H@std@@YA?AVexception_ptr@0@H@Z" },
+    .{ .sig = .{ .name = "*", .args = &.{ RRef(*StdString), StdPathFormat }, .this = *StdPath }, .itanium = "_ZNSt3__14__fs10filesystem4pathC2EONS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEENS2_6formatE", .msvc = "??0path@filesystem@__fs@std@@QEAA@$$QEAV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@3@W4format@0123@@Z" },
+    // An unscoped function template's name is a substitution candidate.
+    .{ .sig = .{ .name = "f", .template_args = &.{.{ .type = TplArg }}, .args = &.{ *TParam(0), *TParam(0) } }, .itanium = "_Z1fI3FooEvPT_S2_", .msvc = "??$f@UFoo@@@@YAXPEAUFoo@@0@Z" },
 };
 
 const test_eval_branch_quota = 5000;
@@ -398,6 +447,32 @@ test "itanium mangling matches clang" {
     inline for (cases) |c| {
         try std.testing.expectEqualStrings(c.itanium, comptime mangledName(.itanium, c.sig));
     }
+}
+
+test "itanium: a name that already spells libc++'s namespace keeps it" {
+    try std.testing.expectEqualStrings("_ZNSt3__13fooEv", comptime mangledName(.itanium, .{ .name = "std::__1::foo" }));
+    try std.testing.expectEqualStrings("_ZNSt3__13fooEv", comptime mangledName(.itanium, .{ .name = "std::foo" }));
+}
+
+test "itanium: ABI tags, sorted, after the name or the constructor code" {
+    const A = extern struct {
+        x: c_int,
+        pub const cpp_name = "ns::A";
+    };
+    const cases_tagged = .{
+        .{ .sig = Signature{ .name = "f", .this = *A, .abi_tags = &.{ "foo", "bar" } }, .name = "_ZN2ns1A1fB3barB3fooEv" },
+        .{ .sig = Signature{ .name = ":+", .this = *const A, .args = &.{c_int}, .ret = c_int, .abi_tags = &.{"t1"} }, .name = "_ZNK2ns1AplB2t1Ei" },
+        .{ .sig = Signature{ .name = "*", .this = *A, .abi_tags = &.{"t1"} }, .name = "_ZN2ns1AC2B2t1Ev" },
+        .{ .sig = Signature{ .name = "~", .this = *A, .abi_tags = &.{"t1"} }, .name = "_ZN2ns1AD2B2t1Ev" },
+        .{ .sig = Signature{ .name = "g", .args = &.{*A}, .abi_tags = &.{"x"} }, .name = "_Z1gB1xPN2ns1AE" },
+        .{ .sig = Signature{ .name = "h", .template_args = &.{.{ .type = A }}, .args = &.{*TParam(0)}, .abi_tags = &.{"x"} }, .name = "_Z1hB1xIN2ns1AEEvPT_" },
+        // libc++'s own, as a build without `_LIBCPP_NO_ABI_TAG` names them.
+        .{ .sig = Signature{ .name = "size", .ret = c_ulonglong, .this = *const StdString, .abi_tags = &.{"nie220108"} }, .name = "_ZNKSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4sizeB9nie220108Ev" },
+        .{ .sig = Signature{ .name = "std::make_exception_ptr", .template_args = &.{.{ .type = c_int }}, .args = &.{TParam(0)}, .ret = StdExceptionPtr, .abi_tags = &.{"nie220108"} }, .name = "_ZSt18make_exception_ptrB9nie220108IiESt13exception_ptrT_" },
+    };
+    inline for (cases_tagged) |c| try std.testing.expectEqualStrings(c.name, comptime mangledName(.itanium, c.sig));
+    // MSVC has no such attribute.
+    try std.testing.expectEqualStrings("?f@A@ns@@QEAAXXZ", comptime mangledName(.msvc, cases_tagged[0].sig));
 }
 
 test "msvc mangling matches clang" {
@@ -831,6 +906,10 @@ test "operator overloads" {
 
 test "trampoline entry points by arity" {
     @setEvalBranchQuota(test_eval_branch_quota);
+    // These return a `.managed_copy` class, which on AArch64 goes through
+    // `x8Call`, and pass more arguments than its six general registers.
+    // The entry points are the same on every target; x86_64 covers them.
+    if (comptime builtin.cpu.arch.isAARCH64()) return error.SkipZigTest;
     const live = bindFn(&.{}, c_int, "ns::live_strs");
     const base = live();
     const str_make = bindFn(&.{[*:0]const u8}, Str, "ns::str_make");
@@ -944,6 +1023,10 @@ test "call shapes of base methods" {
 
 test "a wrapper past ten parameters takes its arguments as a tuple" {
     @setEvalBranchQuota(test_eval_branch_quota);
+    // These return a `.managed_copy` class, which on AArch64 goes through
+    // `x8Call`, and pass more arguments than its six general registers.
+    // The entry points are the same on every target; x86_64 covers them.
+    if (comptime builtin.cpu.arch.isAARCH64()) return error.SkipZigTest;
     const ten: []const type = &.{ Str, Str, Str, Str, Str, Str, Str, Str };
     const eleven: []const type = &.{ Str, Str, Str, Str, Str, Str, Str, Str, Str };
     // Ten visible parameters stay a plain parameter list; eleven collapse.

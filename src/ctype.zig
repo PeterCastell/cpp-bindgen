@@ -342,6 +342,8 @@ pub const Function = struct {
     is_virtual: bool = false,
     virtual_bases: bool = false,
     access: Access = .public,
+    /// `[[gnu::abi_tag]]` strings, which only Itanium mangles.
+    abi_tags: []const []const u8 = &.{},
 
     pub const This = struct { is_const: bool };
     pub const Special = enum { none, ctor, dtor };

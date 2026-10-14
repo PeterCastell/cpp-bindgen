@@ -47,6 +47,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const cpp = @import("root.zig");
+const aarch64 = @import("aarch64.zig");
 const vtable = @import("vtable.zig");
 
 const Signature = cpp.Signature;
@@ -201,7 +202,7 @@ pub fn Subclass(comptime Base: type, comptime Outer: type, comptime field: []con
                     return r;
                 }
             };
-            return entryPoint(shape.params, shape.ret, Body);
+            return entryFor(shape, Body);
         }
 
         inline fn destroyArgs(comptime shape: cpp.CalleeShape, c: anytype) void {
@@ -233,16 +234,25 @@ pub fn Subclass(comptime Base: type, comptime Outer: type, comptime field: []con
                     var moved = c;
                     const p = @intFromPtr(c[shape.this_index]);
                     moved[shape.this_index] = @ptrFromInt(if (delta >= 0) p + delta else p - (-delta));
+                    if (shape.via_x8) {
+                        aarch64.call(shape.params, @ptrCast(def), moved);
+                        return moved[0];
+                    }
                     return @call(.auto, def, moved);
                 }
             };
-            return entryPoint(shape.params, shape.ret, Body);
+            return entryFor(shape, Body);
         }
 
         fn Destructors(comptime off: comptime_int) type {
             return struct {
-                fn complete(this: *anyopaque) callconv(.c) void {
+                const CompleteRet = if (cpp.abi.structors_return_this) *anyopaque else void;
+                /// Returns `this` where the ABI says a complete destructor
+                /// does (`abi.structors_return_this`). Clang ignores the
+                /// value at a virtual call, but the ABI lets a caller use it.
+                fn complete(this: *anyopaque) callconv(.c) CompleteRet {
                     destroy(outerFrom(off, @intFromPtr(this)));
+                    if (CompleteRet != void) return this;
                 }
                 fn deleting(this: *anyopaque) callconv(.c) void {
                     const o = outerFrom(off, @intFromPtr(this));
@@ -371,6 +381,25 @@ pub fn Subclass(comptime Base: type, comptime Outer: type, comptime field: []con
             return out;
         }
     };
+}
+
+/// `entryPoint` for a slot of `shape`. Where the hidden return pointer comes
+/// in x8, an assembly entry moves it to the front, past a padding parameter
+/// (see `aarch64.entryFromX8`), and the `callconv(.c)` function behind it
+/// drops the padding before `Body.run` sees the arguments.
+fn entryFor(comptime shape: cpp.CalleeShape, comptime Body: type) *const anyopaque {
+    if (!shape.via_x8) return entryPoint(shape.params, shape.ret, Body);
+    const P = shape.params;
+    const Padded = struct {
+        inline fn run(c: anytype) shape.ret {
+            var args: @Tuple(P) = undefined;
+            args[0] = c[0];
+            inline for (1..P.len) |i| args[i] = c[i + 1];
+            return Body.run(args);
+        }
+    };
+    const adapter = entryPoint(P[0..1] ++ &[_]type{usize} ++ P[1..], shape.ret, Padded);
+    return aarch64.entryFromX8(adapter);
 }
 
 /// A `callconv(.c)` function of `P` that hands its arguments to `Body.run`

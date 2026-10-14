@@ -361,6 +361,42 @@ A virtual call from inside the base constructor or destructor reaches the base, 
 in C++. An object that registers its own address somewhere cannot move; one that
 does not can, since its vtables are static.
 
+## The standard library
+
+Write a standard-library name as C++ source writes it, `std::basic_string` or
+`std::exception`, and the same binding serves both ABIs.
+
+On Itanium targets, Zig compiles C++ against libc++, which declares its library in the
+inline namespace `std::__1`. Source never spells that namespace, but every mangled name
+carries it, so the mangler adds it: `std::basic_string` is mangled as
+`std::__1::basic_string`. The few names libc++ keeps directly in `std`, so that they stay
+the names libc++abi defines, are left alone: `std::exception`, `std::type_info`,
+`std::bad_alloc`, `std::terminate`, and the rest of `abi.libcxx.unversioned`. The glue
+writes out each spelling the mangler chose, so a name it has in the wrong namespace fails
+to compile on its own line instead of failing to link. Two overload sets come out wrong
+and need a C++ wrapper: the `swap` for `exception_ptr`, and the operators on `std::byte`.
+They are directly in `std`, but they share their names with overloads in `std::__1`.
+
+A namespace alias is invisible to a mangler. libc++'s `std::filesystem` is an alias for
+`std::__fs::filesystem`, so write `std::__fs::filesystem::path` for an Itanium target.
+
+libc++ also tags each member it defines only in its headers with `[[gnu::abi_tag]]`. The
+tag encodes the libc++ version and build mode (`B9nie220108`), so it would change with
+every Zig release, and no binding could tell which members carry it. The glue therefore
+compiles libc++ with `_LIBCPP_NO_ABI_TAG`. The members it emits for the bindings then have
+plain names, and a binding never mentions a libc++ tag. Every other translation unit keeps
+its tagged copies, which never collide with the glue's: libc++ already makes these
+members hidden, one copy per linked image. If a libc++ ever ignores the define, the glue
+fails with a `static_assert` that says so.
+
+For a tag of your own library's, list it in `abi_tags`. Itanium mangles the tags into
+the name; MSVC ignores them:
+
+```zig
+// [[gnu::abi_tag("v2")]] int ns::parse(const char*);
+const parse = cpp.bind(.{ .name = "ns::parse", .args = &.{[*:0]const u8}, .ret = c_int, .abi_tags = &.{"v2"} });
+```
+
 ## Glue
 
 `cpp-bindgen` can generate a C++ translation unit for your bindings. It does two
@@ -498,8 +534,15 @@ name.
   the ABI, so write `const f = cpp.bind(...)` and let the type be inferred.
 - A `TParam` is understood as a whole parameter, as the pointee of a reference, or as
   a template argument of another type. Nowhere else.
-- On AArch64, a function that returns a class through a hidden pointer fails to
+- On AArch64, a function that returns a class through a hidden pointer receives that
+  pointer in x8, which no Zig calling convention can set or read. A call from Zig, and
+  a `Subclass` override called from C++, go through a short assembly trampoline instead.
+  Such a call can pass at most six arguments in general registers, `this` included:
+  a pointer, an integer, or an enum takes one, a struct up to 16 bytes one or two, a
+  larger struct one, and floating-point arguments take none. Past that, it fails to
   compile.
+- MSVC on ARM64 places a hidden return pointer by its own rules, and returning a class
+  through one fails to compile there.
 - A class with a virtual base cannot declare `cpp_bases`: the base has no fixed
   offset. Spell its layout by hand, and reach the base through a C++ thunk.
 - `Subclass` does not support virtual bases, or `delete[]` from C++.
@@ -529,6 +572,11 @@ the C++ side. `test/vtable_optimized.cpp` is compiled with `-O2`, as a release b
 of a C++ library would be. On a Windows x86_64 host
 with MSVC and the Windows SDK, `zig build test-msvc` repeats all of it with the MSVC
 ABI, where those numbers differ.
+
+Another target builds and links the tests without running them, so
+`zig build test -Dtarget=aarch64-macos` checks every mangled name on Windows. The glue
+tests need their generator to run, so a target with another OS leaves them out. CI runs
+the suite on Apple Silicon, natively and as `x86_64-macos` under Rosetta (`-frosetta`).
 
 The library needs Zig 0.17.0-dev.1683+5ceec001b or later.
 

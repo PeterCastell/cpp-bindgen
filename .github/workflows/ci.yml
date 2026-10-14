@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    # Apple Silicon. The x86_64 run goes through Rosetta, so one runner
+    # covers both of Apple's C++ ABIs.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          # The version the suite was last checked against.
+          version: 0.17.0-dev.2138+55455adf1
+      # -j1: two Zig compilations at once can fail spuriously with
+      # "unable to load"; the test step fans out into several.
+      - name: Test (aarch64-macos)
+        run: zig build test -j1 --summary all
+      - name: Check Rosetta
+        run: arch -x86_64 /usr/bin/true || { echo "::error::Rosetta 2 is not installed on this runner"; exit 1; }
+      - name: Test (x86_64-macos, under Rosetta)
+        run: zig build test -j1 --summary all -Dtarget=x86_64-macos -frosetta

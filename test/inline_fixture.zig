@@ -154,3 +154,7 @@ pub const array_size: Signature = .{ .name = "size", .ret = c_int, .class = Arra
 // A second binding file. The scan follows a public re-export, so this line
 // is all `build.zig` needs to know about it.
 pub const extra = @import("inline_extra.zig");
+
+// The standard library, where it is libc++. The glue includes `<string>`
+// and `<exception>` for it on those targets only.
+pub const libcxx = if (cpp.default_mangling == .itanium) @import("inline_libcxx.zig") else struct {};

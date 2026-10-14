@@ -104,3 +104,19 @@ test "inline class returned by value" {
     try std.testing.expectEqual(inl.Rgb{ .r = 1, .g = 2, .b = 3 }, c);
     try std.testing.expectEqual(6, total(c));
 }
+
+test "libc++ members, header-only and tagged, and names directly in std" {
+    if (cpp.default_mangling != .itanium) return error.SkipZigTest;
+    const S = inl.libcxx.String;
+    var s: S = undefined;
+    const text = "1234";
+    cpp.bind(S.ctor)(&s, text, text.len);
+    defer cpp.bind(S.dtor)(&s);
+    try std.testing.expectEqual(4, cpp.bind(S.size)(&s));
+    try std.testing.expectEqualStrings(text, std.mem.span(cpp.bind(S.c_str)(&s)));
+    try std.testing.expectEqual(1234, cpp.bind(inl.libcxx.stoi)(&s, null, 10));
+    // Linked, not called: `std::exception::what` and `std::terminate` live in
+    // libc++abi, directly in `std`.
+    try std.testing.expect(@intFromPtr(cpp.bind(inl.libcxx.Exception.what)) != 0);
+    try std.testing.expect(@intFromPtr(cpp.bind(inl.libcxx.terminate)) != 0);
+}

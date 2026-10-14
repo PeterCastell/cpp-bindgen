@@ -23,6 +23,7 @@ const cpp = @import("root.zig");
 const ctype = @import("ctype.zig");
 const cppsrc = @import("cppsrc.zig");
 const inherit = @import("inherit.zig");
+const itanium = @import("itanium.zig");
 
 const CType = ctype.CType;
 const Signature = cpp.Signature;
@@ -86,6 +87,40 @@ const keep_macro =
     \\
 ;
 
+/// libc++ tags every header-only member with `[[gnu::abi_tag]]`, and the tag
+/// spells the libc++ version and build flags (`B9nie220108`), so the mangled
+/// name of `std::string::size` would change with every Zig release and
+/// differ between members no binding can tell apart. This file emits those
+/// members for the bindings, so it turns the tags off and emits them under
+/// their plain names. Every other translation unit keeps its tagged copies;
+/// the two never collide, and libc++ already makes these members hidden, a
+/// copy per linked image, so nothing depends on there being only one.
+const libcxx_no_abi_tag =
+    \\
+    \\// The bindings name libc++'s header-only members without libc++'s ABI tag.
+    \\#ifndef _LIBCPP_NO_ABI_TAG
+    \\#  define _LIBCPP_NO_ABI_TAG
+    \\#endif
+    \\
+    \\
+;
+
+/// `_LIBCPP_NO_ABI_TAG` is an escape hatch libc++ means to remove someday.
+/// When it does, this fails here rather than as undefined symbols.
+const libcxx_no_abi_tag_check =
+    \\
+    \\#if defined(_LIBCPP_VERSION) && defined(_LIBCPP_HIDE_FROM_ABI)
+    \\#  define CPPBINDGEN_STR2(...) #__VA_ARGS__
+    \\#  define CPPBINDGEN_STR(...) CPPBINDGEN_STR2(__VA_ARGS__)
+    \\static constexpr bool cppbindgen_starts(const char* s, const char* w) { return !*w || (*s == *w && cppbindgen_starts(s + 1, w + 1)); }
+    \\static constexpr bool cppbindgen_contains(const char* s, const char* w) { return *s && (cppbindgen_starts(s, w) || cppbindgen_contains(s + 1, w)); }
+    \\static_assert(!cppbindgen_contains(CPPBINDGEN_STR(_LIBCPP_HIDE_FROM_ABI), "abi_tag"),
+    \\    "cpp-bindgen: this libc++ ignores _LIBCPP_NO_ABI_TAG, so its header-only members keep their ABI tag and the bindings cannot name them; "
+    \\    "a header included before this file may have pulled libc++ in first, or libc++ has dropped the escape hatch");
+    \\#endif
+    \\
+;
+
 /// The whole glue translation unit.
 pub fn render(comptime m: Manifest) []const u8 {
     @setEvalBranchQuota(1 << 30);
@@ -101,9 +136,11 @@ pub fn render(comptime m: Manifest) []const u8 {
         \\
         \\
     ;
+    if (cpp.default_mangling == .itanium) out = out ++ libcxx_no_abi_tag;
     inline for (m.headers) |h| out = out ++ "#include " ++ include(h) ++ "\n";
     // offsetof needs a declaration, and no C++ header is guaranteed here.
     out = out ++ "#include <stddef.h>\n";
+    if (cpp.default_mangling == .itanium) out = out ++ libcxx_no_abi_tag_check;
     out = out ++ keep_macro;
 
     // Aliases first: they name each class once, so the checks and the stubs
@@ -111,6 +148,7 @@ pub fn render(comptime m: Manifest) []const u8 {
     out = out ++ "\n// Every C++ class a binding names.\n";
     inline for (types, 0..) |t, i| out = out ++ "typedef " ++ cppsrc.pathName(t.info.path) ++ " " ++ alias(i) ++ ";\n";
 
+    if (cpp.default_mangling == .itanium) out = out ++ libcxxChecks(types, fns);
     out = out ++ instantiations(types);
     out = out ++ definitions(fns, types);
     out = out ++ notForced(fns);
@@ -261,6 +299,74 @@ fn fnKey(comptime f: ctype.Function) []const u8 {
     k = k ++ ")";
     if (f.this) |t| k = k ++ (if (t.is_const) " const" else " mut");
     return k;
+}
+
+/// The Itanium mangler spells a standard-library name the way libc++
+/// declares it, `std::__1::basic_string` for `std::basic_string`, except for
+/// the names it knows libc++ keeps directly in `std`. Here each of those
+/// spellings is written out for the compiler: one that names nothing is a
+/// name the mangler has in the wrong namespace, and fails on its own line
+/// rather than as an undefined symbol at link time.
+fn libcxxChecks(comptime types: []const Entry, comptime fns: []const ctype.Function) []const u8 {
+    comptime var classes: []const []const ctype.Component = &.{};
+    comptime var free: []const []const ctype.Component = &.{};
+    inline for (types) |e| classes = stdPaths(classes, .{ .named = e.info });
+    inline for (fns) |f| {
+        classes = stdPaths(classes, f.ret);
+        inline for (f.params) |p| classes = stdPaths(classes, p);
+        if (f.this != null or f.is_static or f.special != .none) {
+            classes = addStdPath(classes, f.path[0 .. f.path.len - 1]);
+        } else {
+            free = addStdPath(free, f.path);
+        }
+    }
+
+    comptime var out: []const u8 = "";
+    inline for (classes) |path| {
+        const mangled = itanium.libcxxPath(path);
+        if (mangled.len == path.len) continue;
+        const written = cppsrc.pathName(path);
+        out = out ++ assert("__is_same(" ++ written ++ ", " ++ cppsrc.pathName(mangled) ++ ")", written ++ libcxx_note);
+    }
+    // A function is named by a using-declaration, which takes the whole
+    // overload set and so needs no signature.
+    comptime var usings: []const u8 = "";
+    inline for (free) |path| {
+        const mangled = itanium.libcxxPath(path);
+        if (mangled.len == path.len) continue;
+        usings = usings ++ "    using ::" ++ cppsrc.pathName(mangled[0 .. mangled.len - 1]) ++ "::" ++ mangled[mangled.len - 1].name ++ ";\n";
+    }
+    if (usings.len > 0) out = out ++ "// Each of these functions" ++ libcxx_note ++ "\nnamespace cppbindgen_libcxx {\n" ++ usings ++ "}\n";
+    if (out.len == 0) return "";
+    return "\n// Standard-library names, spelled as the mangler spells them.\n" ++ out;
+}
+
+const libcxx_note = " is mangled as a member of libc++'s inline namespace std::__1; a name libc++ declares directly in std belongs in cpp-bindgen's abi.libcxx.unversioned";
+
+/// Every `std::` class path in `t`, template arguments included.
+fn stdPaths(comptime list: []const []const ctype.Component, comptime t: CType) []const []const ctype.Component {
+    return switch (t) {
+        .builtin, .template_param => list,
+        .pointer => |p| stdPaths(list, p.child.*),
+        .reference => |r| stdPaths(list, r.child.*),
+        .named => |n| blk: {
+            comptime var out = addStdPath(list, n.path);
+            inline for (n.path) |c| inline for (c.args) |a| {
+                out = switch (a) {
+                    .type => |at| stdPaths(out, at),
+                    .integral => |v| stdPaths(out, v.type),
+                };
+            };
+            break :blk out;
+        },
+    };
+}
+
+fn addStdPath(comptime list: []const []const ctype.Component, comptime path: []const ctype.Component) []const []const ctype.Component {
+    if (path.len < 2 or !std.mem.eql(u8, path[0].name, "std")) return list;
+    const k = ctype.pathKey(path);
+    inline for (list) |p| if (std.mem.eql(u8, ctype.pathKey(p), k)) return list;
+    return list ++ &[_][]const ctype.Component{path};
 }
 
 /// `template struct tpl::vec<3, float, (tpl::qualifier)1>;` — the one
@@ -518,6 +624,38 @@ test "render checks a class" {
     try expectContains(out, "static_assert(alignof(cppbindgen_t0) == 4,");
     try expectContains(out, "static_assert(offsetof(cppbindgen_t0, n) == 0,");
     try expectContains(out, "static_assert(__is_trivial(cppbindgen_t0) && __is_standard_layout(cppbindgen_t0),");
+}
+
+test "render spells standard-library names as the mangler does" {
+    const mod = struct {
+        pub const Str = opaque {
+            pub const cpp_template = cpp.Template{ .name = "std::basic_string", .kind = .class, .args = &.{
+                .{ .type = u8 },
+                .{ .template = .{ .name = "std::char_traits", .args = &.{.{ .type = u8 }} } },
+                .{ .template = .{ .name = "std::allocator", .args = &.{.{ .type = u8 }}, .kind = .class } },
+            } };
+            pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+            pub const cpp_no_instantiate = true;
+        };
+        pub const Exc = opaque {
+            pub const cpp_name = "std::exception";
+        };
+        pub const size: Signature = .{ .name = "size", .ret = c_ulong, .this = *const Str };
+        pub const what: Signature = .{ .name = "f", .args = &.{*const Exc} };
+        pub const stoi: Signature = .{ .name = "std::stoi", .args = &.{cpp.Ref(*const Str)}, .ret = c_int };
+        pub const terminate: Signature = .{ .name = "std::terminate" };
+    };
+    const out = comptime render(.{ .modules = &.{mod} });
+    if (cpp.default_mangling == .itanium) {
+        try expectContains(out, "static_assert(__is_same(std::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::__1::basic_string<char, std::char_traits<char>, std::allocator<char> >),");
+        try expectContains(out, "static_assert(__is_same(std::char_traits<char>, std::__1::char_traits<char>),");
+        try expectContains(out, "    using ::std::__1::stoi;\n");
+        // Already directly in `std`: nothing to check.
+        try std.testing.expect(std.mem.indexOf(u8, out, "std::__1::exception") == null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "__1::terminate") == null);
+    } else {
+        try std.testing.expect(std.mem.indexOf(u8, out, "__1") == null);
+    }
 }
 
 test "render checks bases and polymorphism" {

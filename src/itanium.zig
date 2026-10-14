@@ -1,6 +1,7 @@
 //! Itanium C++ ABI name mangling (GCC/Clang, including `*-windows-gnu`).
 //! https://itanium-cxx-abi.github.io/cxx-abi/abi.html#mangling
 const std = @import("std");
+const abi = @import("abi.zig");
 const ctype = @import("ctype.zig");
 const CType = ctype.CType;
 const Component = ctype.Component;
@@ -36,31 +37,32 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
     comptime var out: []const u8 = "_Z";
 
     if (f.this != null and f.path.len < 2) @compileError("a member function needs a class in its name: '" ++ ctype.pathKey(f.path) ++ "'");
-    const last = f.path[f.path.len - 1];
+    const path = libcxxPath(f.path);
+    const last = path[path.len - 1];
     const is_template = last.args.len > 0;
     if (is_template and f.special != .none) @compileError("a constructor or destructor cannot be a template: '" ++ ctype.pathKey(f.path) ++ "'");
+    const tags = abiTags(f);
 
     if (f.op) |op| {
         // An operator's code stands where the unqualified name would, inside
         // the nesting when there is one.
-        const code = opCode(op, f, &subs);
-        out = out ++ if (f.path.len == 1)
-            code
+        const code = opCode(op, f, &subs) ++ tags;
+        out = out ++ if (isUnscoped(path))
+            (if (path.len == 2) "St" else "") ++ code
         else
             "N" ++ (if (f.this) |t| (if (t.is_const) "K" else "") else "") ++
-                qualified(f.path[0 .. f.path.len - 1], true, &subs) ++ code ++ "E";
-    } else if (f.path.len == 1) {
-        out = out ++ sourceName(last.name);
-        if (is_template) out = out ++ templateArgs(last.args, &subs);
+                qualified(path[0 .. path.len - 1], true, "", &subs) ++ code ++ "E";
+    } else if (isUnscoped(path)) {
+        out = out ++ qualified(path, false, tags, &subs);
     } else {
         out = out ++ "N";
         if (f.this) |t| if (t.is_const) {
             out = out ++ "K";
         };
         out = out ++ switch (f.special) {
-            .none => qualified(f.path, false, &subs),
-            .ctor => qualified(f.path[0 .. f.path.len - 1], true, &subs) ++ ctorVariant(f),
-            .dtor => qualified(f.path[0 .. f.path.len - 1], true, &subs) ++ dtorVariant(f),
+            .none => qualified(path, false, tags, &subs),
+            .ctor => qualified(path[0 .. path.len - 1], true, "", &subs) ++ ctorVariant(f) ++ tags,
+            .dtor => qualified(path[0 .. path.len - 1], true, "", &subs) ++ dtorVariant(f) ++ tags,
         };
         out = out ++ "E";
     }
@@ -82,6 +84,26 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
 pub fn typeName(comptime t: CType) []const u8 {
     comptime var subs = Subs{};
     return mangleType(t, &subs);
+}
+
+/// `B <source-name>` per tag, in alphabetical order, which is where the
+/// Itanium ABI puts them: after the unqualified name, before any template
+/// arguments, and after a constructor's or destructor's code.
+fn abiTags(comptime f: ctype.Function) []const u8 {
+    comptime var sorted: [f.abi_tags.len][]const u8 = f.abi_tags[0..f.abi_tags.len].*;
+    std.mem.sortUnstable([]const u8, &sorted, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    comptime var out: []const u8 = "";
+    inline for (sorted, 0..) |t, i| {
+        if (t.len == 0) @compileError(ctype.pathKey(f.path) ++ ": an ABI tag cannot be empty");
+        // The attribute ignores a repeated tag.
+        if (i > 0 and std.mem.eql(u8, sorted[i - 1], t)) continue;
+        out = out ++ "B" ++ sourceName(t);
+    }
+    return out;
 }
 
 /// One spelling can be both unary and binary, and Itanium gives each its own
@@ -132,9 +154,35 @@ fn templateNameKey(comptime path: []const Component) []const u8 {
     return ctype.pathKey(path[0 .. path.len - 1]) ++ "::" ++ last.name;
 }
 
+/// The name as libc++ declares it: `std::basic_string` is
+/// `std::__1::basic_string`, because libc++ puts everything in an inline
+/// namespace that source code never has to spell but a mangled name always
+/// carries. The few names libc++ keeps directly in `std` are left alone (see
+/// `abi.libcxx.unversioned`), as is a name that already spells the namespace.
+/// Template arguments keep their own spelling: each is mangled through
+/// `mangleType`, which applies this again.
+pub fn libcxxPath(comptime path: []const Component) []const Component {
+    if (path.len < 2 or !isStd(path)) return path;
+    const head = path[1].name;
+    if (std.mem.eql(u8, head, abi.libcxx.abi_namespace) or !abi.libcxx.isVersioned(head)) return path;
+    return path[0..1] ++ &[_]Component{.{ .name = abi.libcxx.abi_namespace }} ++ path[1..];
+}
+
+fn isStd(comptime path: []const Component) bool {
+    return std.mem.eql(u8, path[0].name, "std") and path[0].args.len == 0;
+}
+
+/// An `<unscoped-name>`: one at global scope, or one directly in `std`,
+/// which the abbreviation `St` stands in front of instead of a nesting.
+fn isUnscoped(comptime path: []const Component) bool {
+    return path.len == 1 or (path.len == 2 and isStd(path));
+}
+
 /// `<prefix>` chain, substituting the longest seen prefix. Registers each
 /// prefix; the full path only when `register_last` (types, not functions).
-fn qualified(comptime path: []const Component, comptime register_last: bool, comptime subs: *Subs) []const u8 {
+/// A leading `std` is `St`, which is not itself a substitution candidate.
+/// `tags` follow the last component's name, ahead of its template arguments.
+fn qualified(comptime path: []const Component, comptime register_last: bool, comptime tags: []const u8, comptime subs: *Subs) []const u8 {
     comptime var out: []const u8 = "";
     comptime var start: usize = 0;
     comptime var i = path.len;
@@ -153,8 +201,13 @@ fn qualified(comptime path: []const Component, comptime register_last: bool, com
             }
         }
     }
+    if (start == 0 and path.len > 1 and isStd(path)) {
+        out = "St";
+        start = 1;
+    }
     inline for (path[start..], start..) |c, j| {
         out = out ++ sourceName(c.name);
+        if (j + 1 == path.len) out = out ++ tags;
         if (c.args.len > 0) {
             subs.add(templateNameKey(path[0 .. j + 1]));
             out = out ++ templateArgs(c.args, subs);
@@ -190,9 +243,10 @@ fn mangleType(comptime t: CType, comptime subs: *Subs) []const u8 {
             return out;
         },
         .named => |n| {
-            if (subs.find(t.key())) |idx| return Subs.ref(idx);
-            if (n.path.len == 1) return qualified(n.path, true, subs);
-            return "N" ++ qualified(n.path, true, subs) ++ "E";
+            const path = libcxxPath(n.path);
+            if (subs.find(ctype.pathKey(path))) |idx| return Subs.ref(idx);
+            if (isUnscoped(path)) return qualified(path, true, "", subs);
+            return "N" ++ qualified(path, true, "", subs) ++ "E";
         },
     }
 }

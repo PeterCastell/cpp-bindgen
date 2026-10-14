@@ -12,7 +12,11 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(addTests(b, target, optimize, "test"));
-    test_step.dependOn(addGlueTests(b, target, optimize, "test-inline"));
+    // The glue generator has to run on this machine, so a target of another
+    // OS gets the fixture tests alone. Those still compile and link, which
+    // checks every mangled name; they just cannot run.
+    if (target.result.os.tag == b.graph.host.result.os.tag)
+        test_step.dependOn(addGlueTests(b, target, optimize, "test-inline"));
 
     // Also exercise the MSVC ABI on a Windows x86_64 host (needs MSVC + SDK).
     if (builtin.os.tag == .windows and builtin.cpu.arch == .x86_64) {
@@ -206,7 +210,15 @@ fn addTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
             &.{ "-std=c++17", "-O2" },
     });
     const tests = b.addTest(.{ .name = name, .root_module = mod });
-    return &b.addRunArtifact(tests).step;
+    return &runTests(b, tests).step;
+}
+
+/// Runs a test binary, or on a target this machine cannot execute, only
+/// builds and links it.
+fn runTests(b: *std.Build, tests: *std.Build.Step.Compile) *std.Build.Step.Run {
+    const run = b.addRunArtifact(tests);
+    run.skip_foreign_checks = true;
+    return run;
 }
 
 /// End to end: generate the glue for `test/inline_fixture.zig`, compile it
@@ -240,7 +252,7 @@ fn addGlueTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     addGlue(b, b.path("tools/emit.zig"), lib, .{
         .attach_to = mod,
         .binding_module = bindings,
-        .headers = &.{"inline_fixture.hpp"},
+        .headers = if (is_msvc) &.{"inline_fixture.hpp"} else &.{ "inline_fixture.hpp", "<string>", "<exception>" },
         // Optimized, as a release build compiles it: a definition the glue
         // fails to force is then missing, where at -O0 it might survive.
         .flags = if (is_msvc) &.{ "-O2", "-fno-autolink", "-fno-rtti" } else &.{"-O2"},
@@ -249,5 +261,5 @@ fn addGlueTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     });
 
     const tests = b.addTest(.{ .name = name, .root_module = mod });
-    return &b.addRunArtifact(tests).step;
+    return &runTests(b, tests).step;
 }
