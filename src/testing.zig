@@ -102,6 +102,43 @@ const Poly = extern struct {
     pub const cpp_abi: ClassAbi = .managed_copy;
     pub const cpp_virtual_dtor = true;
 };
+/// Members at every access, which only MSVC mangles.
+const Acc = extern struct {
+    _vptr: *const anyopaque,
+    v: c_int,
+    _tail: [4]u8,
+    pub const cpp_name = "ns::Acc";
+    pub const cpp_kind: Kind = .class;
+    pub const cpp_abi: ClassAbi = .managed_copy;
+    pub const cpp_virtual_dtor = true;
+
+    pub const ctor: Signature = .{ .name = "*", .args = &.{c_int}, .this = *Acc };
+    pub const ctor_default: Signature = .{ .name = "*", .this = *Acc, .access = .protected };
+    pub const ctor_char: Signature = .{ .name = "*", .args = &.{u8}, .this = *Acc, .access = .private };
+    pub const dtor: Signature = .{ .name = "~", .this = *Acc, .access = .protected };
+    pub const prot: Signature = .{ .name = "prot", .args = &.{c_int}, .ret = c_int, .this = *const Acc, .access = .protected };
+    pub const prot_static: Signature = .{ .name = "protStatic", .ret = c_int, .class = Acc, .access = .protected };
+    pub const prot_virtual: Signature = .{ .name = "protVirtual", .ret = c_int, .this = *Acc, .virtual = true, .access = .protected };
+    pub const priv: Signature = .{ .name = "priv", .ret = c_int, .this = *Acc, .access = .private };
+    pub const priv_static: Signature = .{ .name = "privStatic", .ret = c_int, .class = Acc, .access = .private };
+    pub const priv_virtual: Signature = .{ .name = "privVirtual", .ret = c_int, .this = *const Acc, .virtual = true, .access = .private };
+};
+/// `class VAcc : virtual AccBase` with a protected destructor. Spelled as
+/// `Derived` is; only its size matters here.
+const VAcc = extern struct {
+    _vptr: *const anyopaque,
+    _vbase_vptr: *const anyopaque,
+    a: c_int,
+    _tail: [4]u8,
+    pub const cpp_name = "ns::VAcc";
+    pub const cpp_kind: Kind = .class;
+    pub const cpp_abi: ClassAbi = .managed_copy;
+    pub const cpp_virtual_dtor = true;
+    pub const cpp_virtual_bases = true;
+
+    pub const ctor: Signature = .{ .name = "*", .this = *VAcc };
+    pub const dtor: Signature = .{ .name = "~", .this = *VAcc, .access = .protected };
+};
 /// `struct Derived : virtual VBase`. A virtual base sits where the ABI puts
 /// it, not where the declaration names it: both Itanium and MSVC place the
 /// `VBase` subobject last, behind `Derived`'s own vtable pointer and members.
@@ -328,6 +365,18 @@ const cases = [_]Case{
     .{ .sig = .{ .name = "~", .this = *Derived }, .itanium = "_ZN2ns7DerivedD1Ev", .msvc = "??_DDerived@ns@@QEAAXXZ" },
     .{ .sig = .{ .name = "*", .args = &.{c_int}, .this = *CellInt }, .itanium = "_ZN3tpl4CellIiEC2Ei", .msvc = "??0?$Cell@H@tpl@@QEAA@H@Z" },
     .{ .sig = .{ .name = "~", .this = *CellInt }, .itanium = "_ZN3tpl4CellIiED2Ev", .msvc = "??1?$Cell@H@tpl@@QEAA@XZ" },
+    // Access: only MSVC mangles it, as the function class's letter.
+    .{ .sig = Acc.ctor, .itanium = "_ZN2ns3AccC2Ei", .msvc = "??0Acc@ns@@QEAA@H@Z" },
+    .{ .sig = Acc.ctor_default, .itanium = "_ZN2ns3AccC2Ev", .msvc = "??0Acc@ns@@IEAA@XZ" },
+    .{ .sig = Acc.ctor_char, .itanium = "_ZN2ns3AccC2Ec", .msvc = "??0Acc@ns@@AEAA@D@Z" },
+    .{ .sig = Acc.dtor, .itanium = "_ZN2ns3AccD2Ev", .msvc = "??1Acc@ns@@MEAA@XZ" },
+    .{ .sig = Acc.prot, .itanium = "_ZNK2ns3Acc4protEi", .msvc = "?prot@Acc@ns@@IEBAHH@Z" },
+    .{ .sig = Acc.prot_static, .itanium = "_ZN2ns3Acc10protStaticEv", .msvc = "?protStatic@Acc@ns@@KAHXZ" },
+    .{ .sig = Acc.prot_virtual, .itanium = "_ZN2ns3Acc11protVirtualEv", .msvc = "?protVirtual@Acc@ns@@MEAAHXZ" },
+    .{ .sig = Acc.priv, .itanium = "_ZN2ns3Acc4privEv", .msvc = "?priv@Acc@ns@@AEAAHXZ" },
+    .{ .sig = Acc.priv_static, .itanium = "_ZN2ns3Acc10privStaticEv", .msvc = "?privStatic@Acc@ns@@CAHXZ" },
+    .{ .sig = Acc.priv_virtual, .itanium = "_ZNK2ns3Acc11privVirtualEv", .msvc = "?privVirtual@Acc@ns@@EEBAHXZ" },
+    .{ .sig = VAcc.dtor, .itanium = "_ZN2ns4VAccD1Ev", .msvc = "??_DVAcc@ns@@IEAAXXZ" },
     // Classes by value.
     .{ .sig = .{ .name = "ns::vec_make", .args = &.{ c_int, c_int }, .ret = Vec2 }, .itanium = "_ZN2ns8vec_makeEii", .msvc = "?vec_make@ns@@YA?AUVec2@1@HH@Z" },
     .{ .sig = .{ .name = "ns::vec_dot", .args = &.{ Vec2, Vec2 }, .ret = c_int }, .itanium = "_ZN2ns7vec_dotENS_4Vec2ES0_", .msvc = "?vec_dot@ns@@YAHUVec2@1@0@Z" },
@@ -579,6 +628,30 @@ test "constructors and destructors" {
     try std.testing.expectEqual(0, c.val);
 
     try std.testing.expectEqual(before + 4, dtor_calls());
+}
+
+test "members at every access link" {
+    const acc_dtors = bindFn(&.{}, c_int, "ns::acc_dtors");
+    const before = acc_dtors();
+    var a: Acc = undefined;
+    cpp.bind(Acc.ctor)(&a, 1);
+    try std.testing.expectEqual(4, cpp.bind(Acc.prot)(&a, 3));
+    try std.testing.expectEqual(11, cpp.bind(Acc.prot_static)());
+    try std.testing.expectEqual(13, cpp.bind(Acc.prot_virtual)(&a));
+    try std.testing.expectEqual(14, cpp.bind(Acc.priv)(&a));
+    try std.testing.expectEqual(14, cpp.bind(Acc.priv_static)());
+    try std.testing.expectEqual(16, cpp.bind(Acc.priv_virtual)(&a));
+    cpp.bind(Acc.dtor)(&a);
+    cpp.bind(Acc.ctor_default)(&a);
+    try std.testing.expectEqual(7, a.v);
+    cpp.bind(Acc.dtor)(&a);
+    cpp.bind(Acc.ctor_char)(&a, 'x');
+    try std.testing.expectEqual('x', a.v);
+    cpp.bind(Acc.dtor)(&a);
+    var va: VAcc = undefined;
+    cpp.bind(VAcc.ctor)(&va);
+    cpp.bind(VAcc.dtor)(&va);
+    try std.testing.expectEqual(before + 3 + 110, acc_dtors());
 }
 
 test "visible signatures of by-value classes" {

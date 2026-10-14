@@ -89,4 +89,16 @@ struct Multi : Base, Side {
     Multi(int x, int y, int z) : Base(x), Side(y), m(z) {}
 };
 
+// Shaped like std::filesystem::path: a template constructor that takes any
+// source by const reference, and an overload that takes a string by rvalue
+// reference. A named `&&` parameter is an lvalue, so a stub that passed it on
+// as is would construct through the template, and the `&&` overload, which
+// is what the binding calls, would never be emitted.
+struct Str { int n; };
+struct Path {
+    int kind, len;
+    template <class S> Path(const S& s) : kind(1), len(s.n) {}
+    Path(Str&& s) : kind(2), len(s.n) { s.n = 0; }
+};
+
 } // namespace inl

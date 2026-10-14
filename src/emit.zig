@@ -113,6 +113,7 @@ pub fn render(comptime m: Manifest) []const u8 {
 
     out = out ++ instantiations(types);
     out = out ++ definitions(fns, types);
+    out = out ++ notForced(fns);
     out = out ++ checks(types);
     return out;
 }
@@ -150,8 +151,9 @@ fn addNamespace(comptime list: []const type, comptime T: type) []const type {
     inline for (list) |seen| if (seen == T) return list;
     comptime var out: []const type = list ++ &[_]type{T};
     inline for (declNames(T)) |name| {
+        if (@TypeOf(@field(T, name)) != type) continue;
         const D = @field(T, name);
-        if (@TypeOf(D) == type and isNamespace(D)) out = addNamespace(out, D);
+        if (isNamespace(D)) out = addNamespace(out, D);
     }
     return out;
 }
@@ -171,8 +173,8 @@ fn collectTypes(comptime scope: []const type) []const Entry {
     comptime var out: []const Entry = &.{};
     inline for (scope) |mod| {
         inline for (declNames(mod)) |name| {
+            if (@TypeOf(@field(mod, name)) != type) continue;
             const T = @field(mod, name);
-            if (@TypeOf(T) != type) continue;
             if (!isClassLike(T)) continue;
             if (!@hasDecl(T, "cpp_name") and !@hasDecl(T, "cpp_template")) continue;
             out = addType(out, T);
@@ -190,6 +192,11 @@ fn isClassLike(comptime T: type) bool {
 
 /// The public declarations of any container. A module is a struct, so this
 /// reads a file and a class the same way.
+///
+/// Every scan tests a declaration's type before it reads the value: reading
+/// a function's value makes the generator compile it, and a wrapper that
+/// calls a bound function then references a C++ symbol the generator, which
+/// links no C++, cannot resolve.
 fn declNames(comptime T: type) []const [:0]const u8 {
     return switch (@typeInfo(T)) {
         .@"struct" => |c| c.decl_names,
@@ -229,8 +236,8 @@ fn collectFns(comptime scope: []const type, comptime types: []const Entry) []con
 fn addSignatures(comptime list: []const ctype.Function, comptime container: type) []const ctype.Function {
     comptime var out = list;
     inline for (declNames(container)) |name| {
+        if (@TypeOf(@field(container, name)) != Signature) continue;
         const d = @field(container, name);
-        if (@TypeOf(d) != Signature) continue;
         // A `cpp.firstNamed` marker names no function, and a pure virtual
         // function usually has no definition to force.
         if (comptime cpp.vtable.isNameMarker(d) or d.pure) continue;
@@ -279,6 +286,7 @@ fn instantiations(comptime types: []const Entry) []const u8 {
 fn definitions(comptime fns: []const ctype.Function, comptime types: []const Entry) []const u8 {
     comptime var out: []const u8 = "";
     inline for (fns, 0..) |f, i| {
+        if (f.access != .public) continue;
         const name = "cppbindgen_f" ++ ctype.decimal(i);
         out = out ++ switch (f.special) {
             .ctor => ctorStub(f, types, name),
@@ -293,6 +301,35 @@ fn definitions(comptime fns: []const ctype.Function, comptime types: []const Ent
     }
     if (out.len == 0) return "";
     return "\n// Header-only functions, forced to exist as symbols.\n" ++ out;
+}
+
+/// The functions `definitions` leaves out, by name, so the gap shows. A
+/// non-public member cannot be named from outside its class: a private one
+/// not at all, a protected one only from a derived class. A virtual one
+/// needs nothing from the glue, since its class's vtable references it and
+/// is emitted wherever the class is constructed.
+fn notForced(comptime fns: []const ctype.Function) []const u8 {
+    comptime var out: []const u8 = "";
+    inline for (fns) |f| {
+        if (f.access == .public) continue;
+        out = out ++ "//   " ++ @tagName(f.access) ++ ": " ++ displayName(f) ++ "\n";
+    }
+    if (out.len == 0) return "";
+    return "\n// Not forced, because not public. Each exists only if some other\n" ++
+        "// translation unit emits it.\n" ++ out;
+}
+
+/// `ns::X::get(int) const`, `ns::X::X(int)`, `ns::X::~X()`.
+fn displayName(comptime f: ctype.Function) []const u8 {
+    const class = f.path[0 .. f.path.len - 1];
+    const own = class[class.len - 1].name;
+    const name = switch (f.special) {
+        .ctor => own,
+        .dtor => "~" ++ own,
+        .none => f.path[f.path.len - 1].name,
+    };
+    const qual = if (f.this) |t| (if (t.is_const) " const" else "") else "";
+    return cppsrc.pathName(class) ++ "::" ++ name ++ cppsrc.paramList(f.params) ++ qual;
 }
 
 /// `template int ns::tpl_id<int>(int const&);` — an explicit instantiation
@@ -632,9 +669,16 @@ test "render skips padding fields and honours opt-outs" {
         // Pure, and usually without a definition to force.
         pub const g: Signature = .{ .name = "g", .ret = c_int, .this = *Poly, .pure = true };
         pub const marker = cpp.firstNamed("g");
+        // Not public: no stub, but named in a comment.
+        pub const h: Signature = .{ .name = "h", .args = &.{c_int}, .ret = c_int, .this = *const Poly, .access = .protected };
+        pub const hidden_ctor: Signature = .{ .name = "*", .args = &.{u8}, .this = *Poly, .access = .private };
     };
     const out = comptime render(.{ .modules = &.{mod} });
     try std.testing.expect(std.mem.indexOf(u8, out, "::g(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "->cppbindgen_t0::h(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "tmp(a0)") == null);
+    try expectContains(out, "//   protected: ns::Poly::h(int) const\n");
+    try expectContains(out, "//   private: ns::Poly::Poly(char)\n");
     try expectContains(out, "static_assert(offsetof(cppbindgen_t0, n) == 8,");
     try std.testing.expect(std.mem.indexOf(u8, out, "_vptr") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "template struct tpl::vec") == null);

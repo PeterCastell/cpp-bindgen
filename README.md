@@ -154,6 +154,11 @@ Bind a constructor as a method named `"*"`, and a destructor as `"~"`. Both run 
 storage that you supply. The Zig type must have the size and the alignment of the C++
 object, because the library reads no headers. `addCppGlue` checks that for you.
 
+A member declared `protected:` or `private:` needs `.access = .protected` or
+`.access = .private` in its `Signature`, constructors and destructors included. MSVC
+mangles access into every member's symbol (`?onPositionChanged@ofNode@@MEAAXXZ` is a
+protected virtual), and Itanium ignores it.
+
 ### Base classes
 
 A derived class names its bases and spells the space they take as its first field.
@@ -328,7 +333,8 @@ defer orbit.cpp.deinit();  // cpp_destroy, then ~ofCamera()
 - `cpp_destroy` is the destructor body. `cpp_free` releases the memory when C++
   deletes the object; without it, a `delete` from C++ panics, because C++ cannot
   know how Zig allocated it.
-- `init` runs the base's default constructor, `initWith(ctor, args)` another one.
+- `init` runs the base's public default constructor, `initWith(ctor, args)` another
+  one, such as a protected one (`.access = .protected`).
   In a safe build, either checks the vtables the constructor installed against the
   computed layout first, and panics naming the slot if a `cpp_virtuals` list is
   wrong. `initChecked` returns the mismatch instead, in any build.
@@ -463,6 +469,13 @@ so a `bindMethod` call site is invisible to the scan.
 
 Only *public* declarations are visible, so a private `const std = @import("std")`
 cannot drag the standard library into the walk. A public one would.
+
+A signature for a member that is not public gets no definition. A private member
+cannot be named from outside its class at all, and a protected one only from a
+derived class. The glue lists each one it leaves out in a comment, so the gap shows.
+A virtual one needs nothing: its class's vtable references it, and the vtable is
+emitted wherever the class is constructed. A non-virtual one that is defined only in
+a header exists only if some other translation unit emits it.
 
 Two declarations steer the glue, both on the Zig type:
 

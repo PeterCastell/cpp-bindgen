@@ -326,6 +326,9 @@ pub fn operatorList() []const u8 {
 
 /// A function to mangle. `params` excludes `this`; the last path component
 /// is the function name (ignored for ctors/dtors, see `special`).
+/// A member's access. Only MSVC mangles it.
+pub const Access = enum { public, protected, private };
+
 pub const Function = struct {
     path: []const Component,
     params: []const CType,
@@ -338,6 +341,7 @@ pub const Function = struct {
     op: ?Op = null,
     is_virtual: bool = false,
     virtual_bases: bool = false,
+    access: Access = .public,
 
     pub const This = struct { is_const: bool };
     pub const Special = enum { none, ctor, dtor };

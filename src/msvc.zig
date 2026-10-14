@@ -56,13 +56,14 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
     }
 
     if (f.this) |t| {
-        // Q/U: public non-virtual/virtual; then __ptr64, this-cv, callconv
-        // (__thiscall on x86, __cdecl elsewhere).
+        // The function class (access and virtuality), then __ptr64, this-cv,
+        // callconv (__thiscall on x86, __cdecl elsewhere). A vbase
+        // destructor is never virtual here, whatever the class's is.
         const virt = f.is_virtual and !vbase_dtor;
-        out = out ++ (if (virt) "U" else "Q") ++ (if (ptr64) "E" else "") ++ (if (t.is_const) "B" else "A");
+        out = out ++ functionClass(f.access, if (virt) .virtual else .member) ++ (if (ptr64) "E" else "") ++ (if (t.is_const) "B" else "A");
         out = out ++ (if (builtin.cpu.arch == .x86) "E" else "A");
     } else if (f.is_static) {
-        out = out ++ "SA";
+        out = out ++ functionClass(f.access, .static) ++ "A";
     } else {
         out = out ++ "YA";
     }
@@ -81,6 +82,28 @@ pub fn mangle(comptime f: ctype.Function) []const u8 {
         out = out ++ "@";
     }
     return out ++ "Z";
+}
+
+/// A member function's class code: its access, and whether it is a plain
+/// member, static, or virtual (clang's `mangleFunctionClass`).
+fn functionClass(comptime access: ctype.Access, comptime kind: enum { member, static, virtual }) []const u8 {
+    return switch (access) {
+        .public => switch (kind) {
+            .member => "Q",
+            .static => "S",
+            .virtual => "U",
+        },
+        .protected => switch (kind) {
+            .member => "I",
+            .static => "K",
+            .virtual => "M",
+        },
+        .private => switch (kind) {
+            .member => "A",
+            .static => "C",
+            .virtual => "E",
+        },
+    };
 }
 
 /// A per-vfptr symbol of `class`: `??_7` for the vftable, `??_R4` for its

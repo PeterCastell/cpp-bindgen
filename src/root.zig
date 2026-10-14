@@ -23,6 +23,7 @@ pub const vtable = @import("vtable.zig");
 const subclass = @import("subclass.zig");
 
 pub const Kind = ctype.Kind;
+pub const Access = ctype.Access;
 pub const wchar_t = ctype.wchar_t;
 pub const char16_t = ctype.char16_t;
 pub const char32_t = ctype.char32_t;
@@ -91,6 +92,11 @@ pub const Signature = struct {
     /// override it, and the glue forces no definition for it, since it
     /// usually has none.
     pure: bool = false,
+    /// The member's access, for a member function, constructor, or
+    /// destructor declared `protected:` or `private:`. MSVC mangles it into
+    /// the symbol; Itanium ignores it. The glue forces no definition for a
+    /// non-public member, since it cannot name one from outside the class.
+    access: Access = .public,
 };
 
 // Declarations a Zig type may carry to describe its C++ class, read by
@@ -625,7 +631,10 @@ pub fn describe(comptime sig: Signature) ctype.Function {
         .special = special,
         .op = named.op,
         .is_virtual = sig.virtual or sig.pure,
+        .access = sig.access,
     };
+    if (sig.access != .public and sig.this == null and sig.class == null)
+        @compileError(sig.name ++ ": only a class member has an access; give it a `this`, or a `.class` for a static member");
     if (sig.this) |Self| {
         const Class = thisPointee(sig.name, Self);
         f.virtual_bases = @hasDecl(Class, "cpp_virtual_bases") and Class.cpp_virtual_bases;

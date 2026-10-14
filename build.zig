@@ -241,7 +241,9 @@ fn addGlueTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .attach_to = mod,
         .binding_module = bindings,
         .headers = &.{"inline_fixture.hpp"},
-        .flags = if (is_msvc) &.{ "-fno-autolink", "-fno-rtti" } else &.{},
+        // Optimized, as a release build compiles it: a definition the glue
+        // fails to force is then missing, where at -O0 it might survive.
+        .flags = if (is_msvc) &.{ "-O2", "-fno-autolink", "-fno-rtti" } else &.{"-O2"},
         .target = target,
         .name = b.fmt("{s}-glue", .{name}),
     });

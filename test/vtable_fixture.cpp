@@ -203,6 +203,31 @@ Plug::Plug() {}
 Plug::~Plug() {}
 int Plug::own() { return 5; }
 
+// Overrides at an access other than the one they override, as ofLight
+// overrides ofNode's public customDraw in a private section: MSVC mangles the
+// override's own access into its symbol.
+struct Lamp : Node {
+    Lamp();
+private:
+    int customDraw(int r) const override;
+protected:
+    int onChanged() override;
+};
+Lamp::Lamp() {}
+int Lamp::customDraw(int r) const { return 500 + r; }
+int Lamp::onChanged() { return 501; }
+
+// An abstract base whose constructor and destructor are protected.
+struct Guarded {
+    virtual int g() = 0;
+protected:
+    Guarded();
+    virtual ~Guarded();
+    int k;
+};
+Guarded::Guarded() : k(6) {}
+Guarded::~Guarded() { trace += 10000000; }
+
 // The library's side.
 int read_trace() { return trace; }
 int drive_begin(Cam* c) { return c->begin(); }
@@ -220,6 +245,7 @@ int drive_say(const Talker* t, int v) { return t->say(Msg(v)).v; }
 int drive_size(const Talker* t) { Size s = t->size(); return s.w * 10 + s.h; }
 int drive_at(const Talker* t, int x, int y) { Vec2 r = t->at({x, y}); return r.x * 100 + r.y; }
 int drive_have(Abstract* a) { return a->have(); }
+int drive_g(Guarded* g) { return g->g(); }
 int drive_need(Abstract* a) { return a->need(); }
 int drive_po(const PureOut* p) { return p->po(); }
 int drive_p(P* p) { return p->p(); }

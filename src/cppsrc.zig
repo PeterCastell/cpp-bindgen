@@ -90,11 +90,17 @@ pub fn namedParamList(comptime params: []const CType) []const u8 {
     return out ++ ")";
 }
 
-/// The argument list matching `namedParamList`: `a0, a1`. A stub only has to
-/// odr-use the callee, so an rvalue-reference parameter needs no `std::move`.
+/// The argument list matching `namedParamList`: `a0, a1`. An rvalue-reference
+/// parameter is passed on as `static_cast<T&&>(a0)`: by name it is an lvalue,
+/// and overload resolution could then pick a different function, such as a
+/// template taking `const T&`, and never emit the one the binding calls.
 pub fn argList(comptime params: []const CType) []const u8 {
     comptime var out: []const u8 = "";
-    inline for (0..params.len) |i| out = out ++ (if (i == 0) "" else ", ") ++ "a" ++ ctype.decimal(i);
+    inline for (params, 0..) |p, i| {
+        const name = "a" ++ ctype.decimal(i);
+        const arg = if (p == .reference and p.reference.rvalue) "static_cast<" ++ typeName(p) ++ ">(" ++ name ++ ")" else name;
+        out = out ++ (if (i == 0) "" else ", ") ++ arg;
+    }
     return out;
 }
 
@@ -188,4 +194,6 @@ test "pointer and parameter spellings" {
     try expect("int (*)(int, ns::Counter const*)", comptime pointerType(g));
     try expect("(int a0, ns::Counter const* a1)", comptime namedParamList(g.params));
     try expect("a0, a1", comptime argList(g.params));
+    const moved = comptime [_]CType{ ctype.fromZig(c_int), ctype.fromZig(ctype.RRef(*C)) };
+    try expect("a0, static_cast<ns::Counter&&>(a1)", comptime argList(&moved));
 }

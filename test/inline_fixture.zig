@@ -18,6 +18,16 @@ pub const Counter = extern struct {
     pub const get: Signature = .{ .name = "get", .ret = c_int, .this = *const @This() };
     pub const set: Signature = .{ .name = "set", .args = &.{c_int}, .this = *@This() };
     pub const magic: Signature = .{ .name = "magic", .ret = c_int, .class = @This() };
+
+    // Wrappers, as a real binding has them. The glue generator scans this
+    // type but never links what the wrappers call: only the test binary,
+    // which also links the glue, does.
+    pub fn value(self: *const Counter) c_int {
+        return cpp.bind(get)(self);
+    }
+    pub fn setValue(self: *Counter, v: c_int) void {
+        cpp.bind(set)(self, v);
+    }
 };
 
 pub const Box = extern struct {
@@ -28,6 +38,13 @@ pub const Box = extern struct {
     pub const ctor: Signature = .{ .name = "*", .args = &.{c_int}, .this = *@This() };
     pub const dtor: Signature = .{ .name = "~", .this = *@This() };
     pub const get: Signature = .{ .name = "get", .ret = c_int, .this = *const @This() };
+
+    pub fn init(self: *Box, v: c_int) void {
+        cpp.bind(ctor)(self, v);
+    }
+    pub fn deinit(self: *Box) void {
+        cpp.bind(dtor)(self);
+    }
 };
 
 /// One vtable pointer, then the members. A field named with a leading `_` is
@@ -101,6 +118,20 @@ pub const Multi = extern struct {
     pub const ctor: Signature = .{ .name = "*", .args = &.{ c_int, c_int, c_int }, .this = *@This() };
     pub const base_get: Signature = .{ .name = "baseGet", .class = Base, .ret = c_int, .this = *const @This() };
     pub const side_get: Signature = .{ .name = "sideGet", .class = Side, .ret = c_int, .this = *const @This() };
+};
+
+pub const Str = extern struct {
+    n: c_int,
+    pub const cpp_name = "inl::Str";
+};
+
+pub const Path = extern struct {
+    kind: c_int,
+    len: c_int,
+    pub const cpp_name = "inl::Path";
+    pub const cpp_abi: cpp.ClassAbi = .trivial_copy;
+    /// `Path(Str&&)`, not the template.
+    pub const from_str: Signature = .{ .name = "*", .args = &.{cpp.RRef(*Str)}, .this = *@This() };
 };
 
 // Free functions, and the methods of classes that keep theirs at module

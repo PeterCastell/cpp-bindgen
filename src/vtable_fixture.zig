@@ -413,6 +413,30 @@ pub const OptLeaf = extern struct {
     pub const cpp_virtuals: []const Signature = &.{f};
 };
 
+// struct Lamp : Node { private: int customDraw(int) const override; protected: int onChanged() override; };
+// struct Guarded { virtual int g() = 0; protected: Guarded(); virtual ~Guarded(); int k; };
+pub const Lamp = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    pub const cpp_name = "vt::Lamp";
+    pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+    pub const cpp_bases: []const type = &.{Node};
+    pub const cpp_virtual_dtor = true;
+    pub const customDraw_r: Signature = .{ .name = "customDraw", .this = *const Lamp, .args = &.{c_int}, .ret = c_int, .virtual = true, .access = .private };
+    pub const onChanged: Signature = .{ .name = "onChanged", .this = *Lamp, .ret = c_int, .virtual = true, .access = .protected };
+    pub const cpp_virtuals: []const Signature = &.{ customDraw_r, onChanged };
+};
+pub const Guarded = extern struct {
+    _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
+    k: c_int,
+    pub const cpp_name = "vt::Guarded";
+    pub const cpp_abi: cpp.ClassAbi = .managed_copy;
+    pub const cpp_virtual_dtor = true;
+    pub const ctor: Signature = .{ .name = "*", .this = *Guarded, .access = .protected };
+    pub const g: Signature = .{ .name = "g", .this = *Guarded, .ret = c_int, .pure = true };
+    pub const dtor: Signature = .{ .name = "~", .this = *Guarded, .access = .protected };
+    pub const cpp_virtuals: []const Signature = &.{ g, dtor };
+};
+
 pub const Square = extern struct {
     _bases: cpp.BaseSpan(@This()) align(cpp.baseAlign(@This())),
     pub const cpp_name = "vt::Square";

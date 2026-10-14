@@ -70,6 +70,10 @@ pub const Slot = struct {
     /// The owner declares it pure, so the slot holds the ABI's pure-call
     /// handler rather than a definition.
     pure: bool = false,
+    /// The owner's access to its declaration, which MSVC mangles into the
+    /// definition's symbol. An override may differ from what it overrides:
+    /// ofLight overrides ofNode's public customDraw in a private section.
+    access: cpp.Access = .public,
 };
 
 pub const Table = struct {
@@ -196,7 +200,7 @@ pub fn tables(comptime C: type) []const Table {
                 for (t.slots) |s| {
                     if (sameVirtual(s.sig, sig)) {
                         if (ti == 0) in_primary = true;
-                        nt.slots = nt.slots ++ &[_]Slot{.{ .kind = s.kind, .sig = s.sig, .owner = C, .this_offset = this_offset, .pure = sig.pure }};
+                        nt.slots = nt.slots ++ &[_]Slot{.{ .kind = s.kind, .sig = s.sig, .owner = C, .this_offset = this_offset, .pure = sig.pure, .access = sig.access }};
                     } else nt.slots = nt.slots ++ &[_]Slot{s};
                 }
                 next = next ++ &[_]Table{nt};
@@ -204,7 +208,9 @@ pub fn tables(comptime C: type) []const Table {
             out = next;
             if (if (msvc) first == null else !in_primary) news = news ++ &[_]Signature{sig};
         }
-        if (vdtor) out = ownDestructors(out, C);
+        if (vdtor) out = ownDestructors(out, C, for (list) |s| {
+            if (isDtor(s)) break s.access;
+        } else .public);
         if (!msvc and vdtor and !declares_dtor and !hasDtor(out[0..1]))
             news = news ++ &[_]Signature{.{ .name = "~", .this = *C }};
 
@@ -254,12 +260,13 @@ fn hasDtor(comptime ts: []const Table) bool {
     return false;
 }
 
-fn ownDestructors(comptime ts: []const Table, comptime C: type) []const Table {
+/// `access` is that of `C`'s destructor: as listed, or public if implicit.
+fn ownDestructors(comptime ts: []const Table, comptime C: type, comptime access: cpp.Access) []const Table {
     var out: []const Table = &.{};
     for (ts) |t| {
         var nt = t;
         nt.slots = &.{};
-        for (t.slots) |s| nt.slots = nt.slots ++ &[_]Slot{if (s.kind == .method) s else .{ .kind = s.kind, .sig = s.sig, .owner = C }};
+        for (t.slots) |s| nt.slots = nt.slots ++ &[_]Slot{if (s.kind == .method) s else .{ .kind = s.kind, .sig = s.sig, .owner = C, .access = access }};
         out = out ++ &[_]Table{nt};
     }
     return out;
@@ -271,9 +278,9 @@ fn newSlots(comptime C: type, comptime list: []const Signature, comptime news: [
     var out: []const Slot = &.{};
     if (!msvc) {
         for (news) |s| out = out ++ if (isDtor(s))
-            &[_]Slot{ .{ .kind = .dtor_complete, .sig = s, .owner = C }, .{ .kind = .dtor_deleting, .sig = s, .owner = C } }
+            &[_]Slot{ .{ .kind = .dtor_complete, .sig = s, .owner = C, .access = s.access }, .{ .kind = .dtor_deleting, .sig = s, .owner = C, .access = s.access } }
         else
-            &[_]Slot{.{ .kind = .method, .sig = s, .owner = C, .pure = s.pure }};
+            &[_]Slot{.{ .kind = .method, .sig = s, .owner = C, .pure = s.pure, .access = s.access }};
         return out;
     }
     var groups: []const []const u8 = &.{};
@@ -286,7 +293,7 @@ fn newSlots(comptime C: type, comptime list: []const Signature, comptime news: [
             i -= 1;
             const s = news[i];
             if (!std.mem.eql(u8, groupName(s), g)) continue;
-            out = out ++ &[_]Slot{.{ .kind = if (isDtor(s)) .dtor_deleting else .method, .sig = s, .owner = C, .pure = s.pure }};
+            out = out ++ &[_]Slot{.{ .kind = if (isDtor(s)) .dtor_deleting else .method, .sig = s, .owner = C, .pure = s.pure, .access = s.access }};
         }
     }
     return out;
@@ -423,6 +430,7 @@ pub fn definition(comptime s: Slot) *const fn () callconv(.c) void {
         var d = s.sig;
         d.this = if (isConst(s.sig)) *const s.owner else *s.owner;
         d.class = null;
+        d.access = s.access;
         break :blk d;
     };
     return @extern(*const fn () callconv(.c) void, .{ .name = cpp.mangledName(cpp.default_mangling, d) });
@@ -688,7 +696,7 @@ test "MSVC names a table by the bases that tell it apart" {
 // Against the vtables clang emitted.
 
 test "verify: every layout above matches the vtables clang emitted" {
-    inline for (.{ Node, Cam, Mid, Leaf, In, Out, App, Mix, NoDtor, Mix2, Mix3, B, D1, D2, D3, G, Conv, P1, P3, P, Q, PQ, Top, L1, L2, Dia, E1, E2, F, Shape, Square, fx.Talker, fx.Duo, fx.Abstract, fx.Concrete, fx.PureOut, fx.Plug }) |C| {
+    inline for (.{ Node, Cam, Mid, Leaf, In, Out, App, Mix, NoDtor, Mix2, Mix3, B, D1, D2, D3, G, Conv, P1, P3, P, Q, PQ, Top, L1, L2, Dia, E1, E2, F, Shape, Square, fx.Talker, fx.Duo, fx.Abstract, fx.Concrete, fx.PureOut, fx.Plug, fx.Lamp, fx.Guarded }) |C| {
         verify(C) catch |err| {
             std.debug.print("{s}\n", .{@typeName(C)});
             return err;

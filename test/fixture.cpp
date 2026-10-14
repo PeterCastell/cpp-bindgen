@@ -182,6 +182,45 @@ namespace ns {
     int derived_sum(const Derived& d) { return d.a * 100 + d.b; }
     size_t sizeof_derived() { return sizeof(Derived); }
 }
+// Members at every access. Only MSVC mangles access, so these symbols differ
+// on MSVC and not at all on Itanium. VAcc's destructor, with a virtual base,
+// has a vbase form too, whose code keeps the access but drops the virtual.
+namespace ns {
+    static int acc_dtors_ = 0;
+    int acc_dtors() { return acc_dtors_; }
+    class Acc {
+    public:
+        Acc(int v);
+    protected:
+        Acc();
+        int prot(int x) const;
+        static int protStatic();
+        virtual int protVirtual();
+        virtual ~Acc();
+    private:
+        Acc(char c);
+        int priv();
+        static int privStatic();
+        virtual int privVirtual() const;
+        int v;
+    };
+    Acc::Acc(int v) : v(v) {}
+    Acc::Acc() : v(7) {}
+    Acc::Acc(char c) : v(c) {}
+    Acc::~Acc() { acc_dtors_ += 1; }
+    int Acc::prot(int x) const { return v + x; }
+    int Acc::protStatic() { return 11; }
+    int Acc::protVirtual() { return v + 12; }
+    int Acc::priv() { return v + 13; }
+    int Acc::privStatic() { return 14; }
+    int Acc::privVirtual() const { return v + 15; }
+    struct AccBase { int a; AccBase(); virtual ~AccBase(); };
+    AccBase::AccBase() : a(3) {}
+    AccBase::~AccBase() { acc_dtors_ += 100; }
+    class VAcc : virtual AccBase { public: VAcc(); protected: ~VAcc(); };
+    VAcc::VAcc() {}
+    VAcc::~VAcc() { acc_dtors_ += 10; }
+}
 namespace tpl {
     template<class T> struct Cell { T val; Cell(T x); ~Cell(); T get() const; };
     template<class T> Cell<T>::Cell(T x) : val(x) {}

@@ -30,6 +30,25 @@ test "inline constructor and destructor" {
     try std.testing.expectEqual(-1, b.v);
 }
 
+test "wrapper methods, which the glue generator scans but never links" {
+    var c: inl.Counter = .{ .n = 0 };
+    c.setValue(5);
+    try std.testing.expectEqual(5, c.value());
+    var b: inl.Box = undefined;
+    b.init(8);
+    try std.testing.expectEqual(8, cpp.bind(inl.Box.get)(&b));
+    b.deinit();
+}
+
+test "an rvalue-reference constructor beside a template that would take the argument as an lvalue" {
+    var s: inl.Str = .{ .n = 5 };
+    var p: inl.Path = undefined;
+    cpp.bind(inl.Path.from_str)(&p, &s);
+    try std.testing.expectEqual(2, p.kind);
+    try std.testing.expectEqual(5, p.len);
+    try std.testing.expectEqual(0, s.n); // moved from
+}
+
 test "inline polymorphic class" {
     const ctor = cpp.bind(inl.shape_ctor);
     const area = cpp.bind(inl.shape_area);

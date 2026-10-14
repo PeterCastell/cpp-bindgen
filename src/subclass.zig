@@ -285,7 +285,10 @@ pub fn Subclass(comptime Base: type, comptime Outer: type, comptime field: []con
         fn baseDestructor(b: *Base) void {
             const found = comptime destructorSlot();
             const at = found orelse return;
-            if (comptime abstract()) return cpp.bind(.{ .name = "~", .this = *Base })(b);
+            if (comptime abstract()) {
+                const access = comptime tabs[at.table].slots[at.slot].access;
+                return cpp.bind(.{ .name = "~", .this = *Base, .access = access })(b);
+            }
             const this: *anyopaque = @ptrFromInt(@intFromPtr(b) + tabs[at.table].offset);
             const slot = vtable.emitted(Base, at.table)[at.slot];
             if (msvc) {
@@ -472,6 +475,7 @@ const lib = struct {
     const po = cpp.bindFn(&.{*const fx.PureOut}, c_int, "vt::drive_po");
     const p = cpp.bindFn(&.{*fx.P}, c_int, "vt::drive_p");
     const q = cpp.bindFn(&.{*fx.Q}, c_int, "vt::drive_q");
+    const g = cpp.bindFn(&.{*fx.Guarded}, c_int, "vt::drive_g");
     const delete_node = cpp.bindFn(&.{*fx.Node}, void, "vt::drive_delete_node");
     const delete_out = cpp.bindFn(&.{*fx.Out}, void, "vt::drive_delete_out");
     // Itanium only: the MSVC test binary has no C++ runtime to do these.
@@ -908,4 +912,36 @@ test "an implicit destructor in an optimized library is reached through the vtab
     try std.testing.expectEqual(3, cpp.bindVirtual(fx.Opt.f)(cpp.basePtr(fx.Opt, &o.cpp.base)));
     o.cpp.deinit();
     try std.testing.expectEqual(before + 1000000, lib.trace());
+}
+
+/// Lamp's overrides are private and protected; the slots they fill hold
+/// those definitions, which MSVC names with their own access.
+const ZigLamp = struct {
+    cpp: cpp.Subclass(fx.Lamp, ZigLamp, "cpp"),
+};
+
+/// Built through Guarded's protected constructor, and destroyed through its
+/// protected destructor, by name, since Guarded is abstract.
+const ZigGuarded = struct {
+    cpp: cpp.Subclass(fx.Guarded, ZigGuarded, "cpp"),
+    pub const cpp_overrides = .{.{ fx.Guarded.g, g }};
+    fn g(self: *ZigGuarded) c_int {
+        return self.cpp.base.k + 1;
+    }
+};
+
+test "members that are not public: overrides, constructors and destructors" {
+    var l: ZigLamp = .{ .cpp = undefined };
+    l.cpp.init();
+    defer l.cpp.deinit();
+    const node = cpp.basePtr(fx.Node, &l.cpp.base);
+    try std.testing.expectEqual(507, lib.custom_r(node, 7));
+    try std.testing.expectEqual(501, lib.changed(node));
+
+    const before = lib.trace();
+    var z: ZigGuarded = .{ .cpp = undefined };
+    z.cpp.initWith(fx.Guarded.ctor, .{});
+    try std.testing.expectEqual(7, lib.g(&z.cpp.base));
+    z.cpp.deinit();
+    try std.testing.expectEqual(before + 10000000, lib.trace());
 }
